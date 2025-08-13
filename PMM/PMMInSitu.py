@@ -971,7 +971,7 @@ class PMMInSitu:
         return
 
 
-    def Optimize_Waveguide(self, epochs, rho, fpm, k, S, f, df = 0.5,\
+    def optimize_waveguide_stochastic(self, epochs, rho, fpm, k, S, f, df = 0.5,\
                                alpha = 0.001, sample = 12, p = 0.01,\
                                objective = 'comp', optimizer = 'grad. asc.',\
                                wu = 10, progress_dir = '.', fwin = [],\
@@ -1156,13 +1156,118 @@ class PMMInSitu:
         return
 
 
+    def optimize_waveguide_bayes(self,
+                                 epochs, rho, fpm, k, S, f,
+                                 df=0.5, sample=12, p_range=0.05,
+                                 n_calls=15, n_init=5,
+                                 objective='comp', wu=10, progress_dir='.',
+                                 fwin=[], duty_cycle=0.5, show=True,
+                                 restart_obj=False, verbose=False, ID=''):
+        """
+        Bayesian optimization version of waveguide/beam-steering in-situ tuning.
+        Works like optimize_waveguide_stochastic(), but per 'sample' it runs a
+        Bayesian optimizer over a low-dimensional subspace (the chosen bulbs),
+        searching for additive parameter updates that improve the in-situ objective.
+        """
+        # single backend
+        try:
+            from skopt import gp_minimize
+            from skopt.space import Real
+        except Exception as e:
+            raise ImportError("scikit-optimize required: pip install scikit-optimize") from e
+
+        # progress paths (match stochastic names)
+        rho_path = f"{progress_dir}/rho_Wvg_{f:.1f}GHz_fpm_{fpm:.1f}GHz{ID}.csv"
+        obj_path = f"{progress_dir}/obj_Wvg_{f:.1f}GHz_fpm_{fpm:.1f}GHz{ID}.csv"
+        nrm_path = f"{progress_dir}/norms_Wvg_{f:.1f}GHz_fpm_{fpm:.1f}GHz{ID}.csv"
+
+        # resume / init
+        if os.path.isfile(rho_path):
+            obj  = self.Read_Params(obj_path).tolist()
+            norms = self.Read_Params(nrm_path).tolist()
+            rho_evolution = self.Read_Params(rho_path)
+            rho = np.copy(rho_evolution[np.argmax(obj), :])
+            if verbose:
+                print("Resuming from previous best.")
+        else:
+            rho_evolution = np.zeros((1, rho.shape[0]))
+            rho_evolution[0, :] = np.copy(rho)
+            obj = []
+            norms = []
+
+        num_bulbs = rho.shape[0]
+        bulbs_all = np.arange(num_bulbs)
+        per_epoch = num_bulbs // sample
+
+        self.Config_Warmup(T=wu, ballasts='New', duty_cycle=duty_cycle)
+
+        # initial objective
+        if (len(obj) == 0) or restart_obj:
+            o, norms = self.Wvg_Obj_Get(rho, fpm, k, S, f, df, objective, [], duty_cycle)
+            obj.append(o)
+            self.Save_Params(np.array(norms), nrm_path)
+            if verbose:
+                print(f"Init objective: {o:.5e}")
+
+        # main loop
+        for e in range(epochs):
+            bulbs = bulbs_all.copy()
+            bulbs_left = num_bulbs
+
+            for s in range(per_epoch):
+                # choose a block without replacement
+                if 2*sample < bulbs.shape[0]:
+                    idx = np.random.choice(bulbs_left, size=sample, replace=False)
+                    block = bulbs[idx]
+                    bulbs = np.delete(bulbs, idx)
+                    bulbs_left -= sample
+                else:
+                    block = bulbs
+                d = block.shape[0]
+                base = np.copy(rho)
+
+                # closure: evaluate objective for a proposed delta on this block
+                def eval_delta(delta_vec):
+                    nonlocal norms
+                    delta = np.clip(np.asarray(delta_vec, float), -p_range, p_range)
+                    trial = np.copy(base)
+                    trial[block] = base[block] + delta
+                    val, nrm = self.Wvg_Obj_Get(trial, fpm, k, S, f, df, objective, norms, duty_cycle)
+                    norms = nrm
+                    return float(val)
+
+                # minimize the negative objective
+                def skopt_obj(x): return -eval_delta(x)
+                space = [Real(-p_range, p_range, name=f"d{i}") for i in range(d)]
+                res = gp_minimize(skopt_obj, space, n_calls=n_calls, n_initial_points=n_init, noise="gaussian")
+
+                # apply best delta from BO
+                best_delta = np.array(res.x, float)
+                rho[block] = base[block] + best_delta
+                best_val = -res.fun  # back to maximizing original objective
+
+                # track and save
+                rho_evolution = np.row_stack([rho_evolution, rho])
+                obj.append(best_val)
+                if verbose:
+                    print(f"Epoch {e+1}/{epochs} | Sample {s+1}/{per_epoch} | BO best {best_val:.5e}")
+
+                self.Save_Params(rho_evolution, rho_path)
+                self.Save_Params(np.array(obj), obj_path)
+
+        best_i = int(np.argmax(np.array(obj)))
+        self.Wvg_Run_And_Plot(progress_dir, rho_evolution[best_i, :], fpm, k, S, f, fwin=fwin, show=show)
+        self.Plot_Obj(f"{progress_dir}/obj_Wvg_{f:.1f}GHz_fpm_{fpm:.1f}GHz{ID}.pdf", np.array(obj))
+        return
+    
+    
     def Wvg_Obj_Get(self, rho, fpm, k, S, f, df = 0.25,\
                     objective = 'comp', norms = [], duty_cycle = 0.5):
         """
         Run array and get one objective value evaluation.
 
         Args:
-            See args for Optimize_Waveguide()
+            See args for optimize_waveguide_stochastic()
         """
         self.ArraySet_Rho(rho, self.f_a(fpm), knob = k, scale = S)
         time.sleep(1)
@@ -1186,7 +1291,7 @@ class PMMInSitu:
         Run array and plot transmission spectrumn.
 
         Args:
-            See args for Optimize_Waveguide() and Trans_Plot_2Port()
+            See args for optimize_waveguide_stochastic() and Trans_Plot_2Port()
         """
         self.ArraySet_Rho(rho, self.f_a(fpm), knob = k, scale = S)
         time.sleep(1)
