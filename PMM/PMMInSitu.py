@@ -23,6 +23,7 @@ import glob
 import sys
 import time
 import yaml
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 ###############################################################################
 ## Utility functions and globals
@@ -266,6 +267,52 @@ class PMMInSitu:
                                        "to the correct RS-485 bus.")
 
 
+    def _cmd_with_retry(self, cmd, addr, cmd_args, cmd_kwargs, tries=3, delay=0.6):
+    """Call a bulb command and retry on any exception."""
+    import time
+    for attempt in range(tries):
+        try:
+            cmd(addr, *cmd_args, **cmd_kwargs)
+            return True
+        except Exception as err:
+            if attempt == tries - 1:
+                print(f"[FAIL] Addr {addr}: {cmd.__name__} → {err}")
+            else:
+                print(f"[WARN] Addr {addr}: {cmd.__name__} failed ({attempt+1}/{tries}); retrying…")
+                time.sleep(delay)
+    return False
+
+    def _parallel_bulb_op(self, cmd_name, *cmd_args, tries=3, delay=0.6, max_workers=None, **cmd_kwargs):
+        """
+        Run self.<cmd_name>(addr, *args, **kwargs) in parallel across RS-485 buses,
+        column-by-column. Matches your notebook logic.
+        """
+        cmd = getattr(self, cmd_name)
+        port_to_addrs = self.config["serial_ports"]
+        addr_lists = list(port_to_addrs.values())
+        n_cols = max(len(lst) for lst in addr_lists)
+    
+        workers = max_workers or len(addr_lists)
+        with ThreadPoolExecutor(max_workers=workers) as pool:
+            for col in range(n_cols):
+                futures = [
+                    pool.submit(
+                        self._cmd_with_retry, cmd, lst[col], cmd_args, cmd_kwargs, tries, delay
+                    )
+                    for lst in addr_lists
+                    if col < len(lst)
+                ]
+                for fut in as_completed(futures):
+                    fut.result()
+    
+        # Final broadcast for on/off ops (cheap and helps catch any stragglers)
+        if cmd_name in ("Activate_Bulb", "Deactivate_Bulb"):
+            try:
+                cmd("all", *cmd_args, **cmd_kwargs)
+            except Exception:
+                pass
+                
+    
     def Address(self, coords):
         """
         Takes array coordinates and returns a bulb address
@@ -368,32 +415,56 @@ class PMMInSitu:
         return
 
 
+    # def Activate_Bulb(self, addr):
+    #     """
+    #     Activate bulb
+    #     """
+    #     if addr == 'all':
+    #         for port in self.bulbs['all']:
+    #             self.bulbs['all'][port].write_register(registeraddress = 0x1006,\
+    #                     value = 1, functioncode = 6)
+    #     else:
+    #         self.bulbs[addr]['Inst'].write_register(registeraddress = 0x1006,\
+    #                 value = 1, functioncode = 6)
+    #     return
+
     def Activate_Bulb(self, addr):
-        """
-        Activate bulb
-        """
-        if addr == 'all':
-            for port in self.bulbs['all']:
-                self.bulbs['all'][port].write_register(registeraddress = 0x1006,\
-                        value = 1, functioncode = 6)
-        else:
-            self.bulbs[addr]['Inst'].write_register(registeraddress = 0x1006,\
-                    value = 1, functioncode = 6)
-        return
+    """
+    Activate bulb
+    """
+    if addr == 'all':
+        return self._parallel_bulb_op("Activate_Bulb", tries=3, delay=0.6)
+    else:
+        self.bulbs[addr]['Inst'].write_register(registeraddress = 0x1006,
+                                                value = 1, functioncode = 6)
+    return
 
 
-    def Deactivate_Bulb(self,addr):
-        """
-        Deactivate bulb
-        """
-        if addr == 'all':
-            for port in self.bulbs['all']:
-                self.bulbs['all'][port].write_register(registeraddress = 0x1006,\
-                        value = 0, functioncode = 6)
-        else:
-            self.bulbs[addr]['Inst'].write_register(registeraddress = 0x1006,\
-                    value = 0, functioncode = 6)
-        return
+
+    # def Deactivate_Bulb(self,addr):
+    #     """
+    #     Deactivate bulb
+    #     """
+    #     if addr == 'all':
+    #         for port in self.bulbs['all']:
+    #             self.bulbs['all'][port].write_register(registeraddress = 0x1006,\
+    #                     value = 0, functioncode = 6)
+    #     else:
+    #         self.bulbs[addr]['Inst'].write_register(registeraddress = 0x1006,\
+    #                 value = 0, functioncode = 6)
+    #     return
+
+    def Deactivate_Bulb(self, addr):
+    """
+    Deactivate bulb
+    """
+    if addr == 'all':
+        return self._parallel_bulb_op("Deactivate_Bulb", tries=3, delay=0.6)
+    else:
+        self.bulbs[addr]['Inst'].write_register(registeraddress = 0x1006,
+                                                value = 0, functioncode = 6)
+    return
+
 
 
     def Scale_Rho_ne(self, rho, wp_max):
