@@ -1,0 +1,11 @@
+numpy
+scipy
+matplotlib
+autograd
+pyMKL
+ceviche
+scikit-image
+minimalmodbus
+pyserial
+serial
+RSInstrument

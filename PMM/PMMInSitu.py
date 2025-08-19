@@ -268,19 +268,19 @@ class PMMInSitu:
 
 
     def _cmd_with_retry(self, cmd, addr, cmd_args, cmd_kwargs, tries=3, delay=0.6):
-    """Call a bulb command and retry on any exception."""
-    import time
-    for attempt in range(tries):
-        try:
-            cmd(addr, *cmd_args, **cmd_kwargs)
-            return True
-        except Exception as err:
-            if attempt == tries - 1:
-                print(f"[FAIL] Addr {addr}: {cmd.__name__} → {err}")
-            else:
-                print(f"[WARN] Addr {addr}: {cmd.__name__} failed ({attempt+1}/{tries}); retrying…")
-                time.sleep(delay)
-    return False
+        """Call a bulb command and retry on any exception."""
+        import time
+        for attempt in range(tries):
+            try:
+                cmd(addr, *cmd_args, **cmd_kwargs)
+                return True
+            except Exception as err:
+                if attempt == tries - 1:
+                    print(f"[FAIL] Addr {addr}: {cmd.__name__} → {err}")
+                else:
+                    print(f"[WARN] Addr {addr}: {cmd.__name__} failed ({attempt+1}/{tries}); retrying…")
+                    time.sleep(delay)
+        return False
 
     def _parallel_bulb_op(self, cmd_name, *cmd_args, tries=3, delay=0.6, max_workers=None, **cmd_kwargs):
         """
@@ -429,15 +429,15 @@ class PMMInSitu:
     #     return
 
     def Activate_Bulb(self, addr):
-    """
-    Activate bulb
-    """
-    if addr == 'all':
-        return self._parallel_bulb_op("Activate_Bulb", tries=3, delay=0.6)
-    else:
-        self.bulbs[addr]['Inst'].write_register(registeraddress = 0x1006,
-                                                value = 1, functioncode = 6)
-    return
+        """
+        Activate bulb
+        """
+        if addr == 'all':
+            return self._parallel_bulb_op("Activate_Bulb", tries=3, delay=0.6)
+        else:
+            self.bulbs[addr]['Inst'].write_register(registeraddress = 0x1006,
+                                                    value = 1, functioncode = 6)
+        return
 
 
 
@@ -455,15 +455,15 @@ class PMMInSitu:
     #     return
 
     def Deactivate_Bulb(self, addr):
-    """
-    Deactivate bulb
-    """
-    if addr == 'all':
-        return self._parallel_bulb_op("Deactivate_Bulb", tries=3, delay=0.6)
-    else:
-        self.bulbs[addr]['Inst'].write_register(registeraddress = 0x1006,
-                                                value = 0, functioncode = 6)
-    return
+        """
+        Deactivate bulb
+        """
+        if addr == 'all':
+            return self._parallel_bulb_op("Deactivate_Bulb", tries=3, delay=0.6)
+        else:
+            self.bulbs[addr]['Inst'].write_register(registeraddress = 0x1006,
+                                                    value = 0, functioncode = 6)
+        return
 
 
 

@@ -1,0 +1,25 @@
+Metadata-Version: 2.4
+Name: PMM
+Version: 0.0
+Summary: Plasma Metamaterial design tools.
+Download-URL: https://github.com/StanfordPlasmaPhysics/InversePMMDesign
+Author: Jesse A. Rodriguez
+Author-email: jrodrig@stanford.edu
+License-File: LICENSE
+Requires-Dist: numpy
+Requires-Dist: scipy
+Requires-Dist: matplotlib
+Requires-Dist: autograd
+Requires-Dist: pyMKL
+Requires-Dist: ceviche
+Requires-Dist: scikit-image
+Requires-Dist: minimalmodbus
+Requires-Dist: pyserial
+Requires-Dist: serial
+Requires-Dist: RSInstrument
+Dynamic: author
+Dynamic: author-email
+Dynamic: download-url
+Dynamic: license-file
+Dynamic: requires-dist
+Dynamic: summary
