@@ -24,6 +24,7 @@ import sys
 import time
 import yaml
 from concurrent.futures import ThreadPoolExecutor, as_completed
+import threading
 
 ###############################################################################
 ## Utility functions and globals
@@ -260,6 +261,7 @@ class PMMInSitu:
                         print("The power supply associated with bulb "\
                               +str(bulb_addr)+" is putting out power, fixing "+\
                               "now. Check power supply.")
+                        time.sleep(1.0)
                         self.bulbs[bulb_addr]['Inst'].write_register(\
                                 registeraddress=0x1006, value = 0, functioncode = 6)
                 except:
@@ -282,36 +284,27 @@ class PMMInSitu:
                     time.sleep(delay)
         return False
 
-    def _parallel_bulb_op(self, cmd_name, *cmd_args, tries=3, delay=0.6, max_workers=None, **cmd_kwargs):
+    def parallel_bulb_op(self, cmd_name, *cmd_args, tries=3, delay=0.6, **cmd_kwargs):
         """
-        Run self.<cmd_name>(addr, *args, **kwargs) in parallel across RS-485 buses,
-        column-by-column. Matches your notebook logic.
+        Runs a command on all bulbs, processing each serial port's list of bulbs in parallel
+        using the 'threading' module.
         """
         cmd = getattr(self, cmd_name)
         port_to_addrs = self.config["serial_ports"]
-        addr_lists = list(port_to_addrs.values())
-        n_cols = max(len(lst) for lst in addr_lists)
-    
-        workers = max_workers or len(addr_lists)
-        with ThreadPoolExecutor(max_workers=workers) as pool:
-            for col in range(n_cols):
-                futures = [
-                    pool.submit(
-                        self._cmd_with_retry, cmd, lst[col], cmd_args, cmd_kwargs, tries, delay
-                    )
-                    for lst in addr_lists
-                    if col < len(lst)
-                ]
-                for fut in as_completed(futures):
-                    fut.result()
-    
-        # Final broadcast for on/off ops (cheap and helps catch any stragglers)
-        if cmd_name in ("Activate_Bulb", "Deactivate_Bulb"):
-            try:
-                cmd("all", *cmd_args, **cmd_kwargs)
-            except Exception:
-                pass
-                
+
+        def process_one_port(address_list):
+            for addr in address_list:
+                self._cmd_with_retry(cmd, addr, cmd_args, cmd_kwargs, tries, delay)
+        threads = []
+        print(f"Starting threads for {len(port_to_addrs)} ports...")
+        for addr_list in port_to_addrs.values():
+            thread = threading.Thread(target=process_one_port, args=(addr_list,))
+            threads.append(thread)
+            thread.start()
+        print("Waiting for all threads to complete...")
+        for thread in threads:
+            thread.join() #wait until threads finished
+        print(f"Finished '{cmd_name}' on all ports.")       
     
     def Address(self, coords):
         """
@@ -454,12 +447,17 @@ class PMMInSitu:
     #                 value = 0, functioncode = 6)
     #     return
 
-    def Deactivate_Bulb(self, addr):
+    def Deactivate_Bulb(self, addr, parallel=True):
         """
         Deactivate bulb
         """
         if addr == 'all':
-            return self._parallel_bulb_op("Deactivate_Bulb", tries=3, delay=0.6)
+            if parallel:
+                return self._parallel_bulb_op("Deactivate_Bulb", tries=3, delay=0.6)
+            else:
+                self.bulbs[addr]['Inst'].write_register(registeraddress = 0x1006,
+                                                    value = 0, functioncode = 6)
+                return
         else:
             self.bulbs[addr]['Inst'].write_register(registeraddress = 0x1006,
                                                     value = 0, functioncode = 6)
