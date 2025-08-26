@@ -23,7 +23,6 @@ import glob
 import sys
 import time
 import yaml
-from concurrent.futures import ThreadPoolExecutor, as_completed
 import threading
 
 ###############################################################################
@@ -270,7 +269,6 @@ class PMMInSitu:
     
     def _parallel_check_bulb(self, addr):
         """Helper for parallel __init__ to check and deactivate a single bulb."""
-        # This is the exact logic from the original __init__ loop.
         try:
             on = self.bulbs[addr]['Inst'].read_register(registeraddress=0x1004)
             if on == 1:
@@ -332,7 +330,6 @@ class PMMInSitu:
         self.parallel_bulb_op('_parallel_check_bulb')
 
 
-
     def _cmd_with_retry(self, cmd, addr, cmd_args, cmd_kwargs, tries=3, delay=0.6):
         """Call a bulb command and retry on any exception."""
         import time
@@ -347,6 +344,7 @@ class PMMInSitu:
                     print(f"[WARN] Addr {addr}: {cmd.__name__} failed ({attempt+1}/{tries}); retrying…")
                     time.sleep(delay)
         return False
+
 
     def parallel_bulb_op(self, cmd_name, *cmd_args, tries=3, delay=0.6, **cmd_kwargs):
         """
@@ -368,7 +366,7 @@ class PMMInSitu:
         print("Waiting for all threads to complete...")
         for thread in threads:
             thread.join() #wait until threads finished
-        print(f"Finished '{cmd_name}' on all ports.")       
+        print(f"Finished '{cmd_name}' on all ports.")            
     
     def Address(self, coords):
         """
@@ -837,12 +835,11 @@ class PMMInSitu:
                 V = bulb_settings[bulb_index, 0]
                 I = bulb_settings[bulb_index, 1]
                 
-                # Original retry loop logic
                 not_set = True
                 tries = 0
                 while not_set and tries < 5:
                     try:
-                        self.Set_Bulb_VI(addr, V, I)
+                        self.Set_Bulb_VI(addr, V, I, verbose=False)
                         time.sleep(0.005)
                         not_set = False
                     except:
@@ -851,7 +848,7 @@ class PMMInSitu:
                         time.sleep(1)
                 if not_set:
                     try:
-                        self.Set_Bulb_VI(addr, V, I)
+                        self.Set_Bulb_VI(addr, V, I, verbose=False)
                         time.sleep(0.005)
                     except:
                         self.Deactivate_Bulb('all')
