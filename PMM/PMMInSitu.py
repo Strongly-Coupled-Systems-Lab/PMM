@@ -209,6 +209,82 @@ def Waveguide_Obj_dB(freq, S21, S31, f, df = 0.25, norms = []):
 ## In-situ inverse design class
 ###############################################################################
 class PMMInSitu:
+    # def __init__(self, conf_file, conf_dir = './../confs/'):
+    #     with open(conf_file, 'r') as conf:
+    #         self.config = yaml.load(conf, Loader=yaml.SafeLoader)
+
+    #     self.a = self.config['array-a']
+    #     self.mu = self.config['mobility']
+    #     self.L = self.config['bulb-length']
+    #     self.VtoI = np.loadtxt(conf_dir+'VtoI.txt', delimiter = ',')
+    #     self.bulbs = {'all': {}}
+    #     self.VNA = self.config['VNA']
+    #     ports = serial_ports()
+    #     for port in self.config['serial_ports']:
+    #         if port not in ports:
+    #             raise RuntimeError("One or more of the ports in the config file\
+    #                                 is not connected")
+                
+    #         print("checking port", port)
+    #         # Create 'all' pathway
+    #         self.bulbs['all'][port] = minimalmodbus.Instrument(port = port,\
+    #                                   slaveaddress = 0,\
+    #                                   mode = minimalmodbus.MODE_RTU)
+    #         self.bulbs['all'][port].serial.baudrate = 9600
+    #         self.bulbs['all'][port].serial.bytesize = 8
+    #         self.bulbs['all'][port].serial.parity = minimalmodbus.serial.PARITY_NONE
+    #         self.bulbs['all'][port].serial.stopbits = 1
+    #         self.bulbs['all'][port].serial.timeout = 1
+    #         self.bulbs['all'][port].serial.close_port_after_each_call = True
+    #         self.bulbs['all'][port].serial.clear_buffers_before_each_transaction = True
+
+    #         # Create bulb entries in dict
+    #         for bulb_addr in self.config['serial_ports'][port]:
+    #             self.bulbs[bulb_addr] = {'I': 0.0, 'V': 0.0,\
+    #                                 'Inst': minimalmodbus.Instrument(\
+    #                                 port = port, slaveaddress = bulb_addr,\
+    #                                 mode = minimalmodbus.MODE_RTU)}
+    #             self.bulbs[bulb_addr]['Inst'].serial.baudrate = 9600
+    #             self.bulbs[bulb_addr]['Inst'].serial.bytesize = 8
+    #             self.bulbs[bulb_addr]['Inst'].serial.parity = minimalmodbus.serial.PARITY_NONE
+    #             self.bulbs[bulb_addr]['Inst'].serial.stopbits = 1
+    #             self.bulbs[bulb_addr]['Inst'].serial.timeout = 1
+    #             self.bulbs[bulb_addr]['Inst'].serial.close_port_after_each_call = True
+    #             self.bulbs[bulb_addr]['Inst'].serial.clear_buffers_before_each_transaction = True
+
+    #             # Now ping each of the power supplies and make sure they are
+    #             # connected to the correct RS-485 bus and aren't already running.
+    #             try:
+    #                 on = self.bulbs[bulb_addr]['Inst'].read_register(\
+    #                         registeraddress=0x1004)
+    #                 if on == 1:
+    #                     print("The power supply associated with bulb "\
+    #                           +str(bulb_addr)+" is putting out power, fixing "+\
+    #                           "now. Check power supply.")
+    #                     time.sleep(1.0)
+    #                     self.bulbs[bulb_addr]['Inst'].write_register(\
+    #                             registeraddress=0x1006, value = 0, functioncode = 6)
+    #             except:
+    #                 raise RuntimeError("Bulb "+str(bulb_addr)+" is not connected "+\
+    #                                    "to the correct RS-485 bus.")
+    
+    def _parallel_check_bulb(self, addr):
+        """Helper for parallel __init__ to check and deactivate a single bulb."""
+        # This is the exact logic from the original __init__ loop.
+        try:
+            on = self.bulbs[addr]['Inst'].read_register(registeraddress=0x1004)
+            if on == 1:
+                print("The power supply associated with bulb "\
+                      +str(addr)+" is putting out power, fixing "+\
+                      "now. Check power supply.")
+                time.sleep(1.0)
+                self.bulbs[addr]['Inst'].write_register(\
+                        registeraddress=0x1006, value = 0, functioncode = 6)
+        except:
+            raise RuntimeError("Bulb "+str(addr)+" is not connected "+\
+                               "to the correct RS-485 bus.")
+            
+    
     def __init__(self, conf_file, conf_dir = './../confs/'):
         with open(conf_file, 'r') as conf:
             self.config = yaml.load(conf, Loader=yaml.SafeLoader)
@@ -252,21 +328,9 @@ class PMMInSitu:
                 self.bulbs[bulb_addr]['Inst'].serial.close_port_after_each_call = True
                 self.bulbs[bulb_addr]['Inst'].serial.clear_buffers_before_each_transaction = True
 
-                # Now ping each of the power supplies and make sure they are
-                # connected to the correct RS-485 bus and aren't already running.
-                try:
-                    on = self.bulbs[bulb_addr]['Inst'].read_register(\
-                            registeraddress=0x1004)
-                    if on == 1:
-                        print("The power supply associated with bulb "\
-                              +str(bulb_addr)+" is putting out power, fixing "+\
-                              "now. Check power supply.")
-                        time.sleep(1.0)
-                        self.bulbs[bulb_addr]['Inst'].write_register(\
-                                registeraddress=0x1006, value = 0, functioncode = 6)
-                except:
-                    raise RuntimeError("Bulb "+str(bulb_addr)+" is not connected "+\
-                                       "to the correct RS-485 bus.")
+        # Now ping each of the power supplies in parallel.
+        self.parallel_bulb_op('_parallel_check_bulb')
+
 
 
     def _cmd_with_retry(self, cmd, addr, cmd_args, cmd_kwargs, tries=3, delay=0.6):
@@ -497,52 +561,42 @@ class PMMInSitu:
 
         return fp_dim
 
-
+    
     def BulbSetting_BOLSIG(self, fp, knob = 0.5, scale = 1.0):
         """
         Maps plasma frequency value in GHz to a current and voltage setting for
-        the DC power supplies
+        the DC power supplies. Based on the fit: fp = 13.5 / (1 + exp(-9 * (I - 13.9)))**(1/6) + amp_offset
+        - Below 0.5 GHz, the bulb is off.
+        - From 0.5 to 2.7 GHz, it's current-controlled (30V fixed).
+        - Above 2.7 GHz, it's voltage-controlled (10A fixed).
 
         Args:
             fp: plasma frequency in GHz (NOT rad/s)
             knob: constant to tune experimental fit to lower and upper range of
-                  BOLSIG cases. knob = 0 is low end and knob = 1 is high end.
+                  cases. knob = 0 is low end and knob = 1 is high end.
             scale: Parameter that scales the overall plasma frequency values.
         """
         k = knob
         S = scale
 
-        if fp/S < 0.21:
+        if fp/S < 0.5: # For very low frequencies, the bulb remains off.
             return (0,0)
         
-        elif fp/S >= 0.21 and fp/S < 0.42:
-            I = (0.42/S-(0.03*k-0.47))**(1/(0.8-0.01*k))/(3.5*k+8.7) #A
-            return (30, I)
+        elif fp/S < 2.7: # The current-controlled regime (Voltage is fixed at 30V). fp = 13.5 / (1 + exp(-9 * (I - 13.9)))**(1/6) + amp_offset
+            log_arg = (13.5 / ((fp/S) - 2.25))**6 - 1 # Argument for the natural log, must be > 0.
+            I = 13.9 - (1/9.0) * np.log(max(log_arg, 1e-9)) # Solved from the logistic fit for current (I).
+            return (30, min(max(I, 0.1), 10.0)) # Clamp current between 0.1A and 10A.
 
-        elif fp/S >= 0.42 and fp/S < 2.2 + 0.81*k:
-            I = (fp/S-(0.03*k-0.47))**(1/(0.8-0.01*k))/(3.5*k+8.7) #A
-            return (30, I)
-        
-        elif fp/S >= 2.2 + 0.81*k and fp/S < 3.32 + 1.3*k:
-            if np.abs(fp/S-(3.32 + 1.3*k)) >= np.abs(fp/S-(2.2 + 0.81*k)):
-                I = (2.2 + 0.81*k-(0.03*k-0.47))**(1/(0.8-0.01*k))/(3.5*k+8.7)
-                return (30, I)
-            else:
-                V = (3.32 + 1.3*k+(5.75+1.1*k))**(1/(0.44+0.04*k))/(20+1.5*k)-0.5
-                return (V, 10)
-
-        elif fp/S >= 3.32 + 1.3*k and fp/S <= 11 + 4.6*k:
-            V = (fp/S+(5.75+1.1*k))**(1/(0.44+0.04*k))/(20+1.5*k)-0.5
-            return (V, 10)
-
-        elif fp/S > 11 + 4.6*k:
-            return (30,10)
+        else: # The voltage-controlled regime (Current is fixed at 10A). fp = 10 * log(V - 4.8)/log(5) - 4.5 + volt_offset
+            V = 5.0**(((fp/S) - (6*k) + 4.5) / 10.0) + 4.8 # Solved from the logarithmic fit for voltage (V).
+            return (min(max(V, 0.0), 32.0), 10) # Clamp voltage between 0V and 32V.
         
 
     def BulbSetting_BOLSIG_NewDC(self, fp, knob = 0.5, scale = 1.0):
         """
         Maps plasma frequency value in GHz to a current and voltage setting for
-        the DC power supplies
+        the DC power supplies. This version uses the new data fits but is structured
+        to emulate the original six-zone operational logic.
 
         Args:
             fp: plasma frequency in GHz (NOT rad/s)
@@ -552,81 +606,93 @@ class PMMInSitu:
         """
         k = knob
         S = scale
-        Min_curr = S*((16/13)*((8.7+k*3.5)*0.08)**(-k*0.01+0.8)+(-0.47+k*0.03))
-        Max_curr = S*((16/13)*((8.7+k*3.5)*0.2)**(-k*0.01+0.8)+(-0.47+k*0.03))
-        Min_volt = S*(((5.25-k*1.7)*(6+0.5))**(k*0.1+0.55)+(k*0.725-0.3475))
-        Max_volt = S*(((5.25-k*1.7)*(30+0.5))**(k*0.1+0.55)+(k*0.725-0.3475))
-        
-        if fp < Min_curr/2:
+
+        Off_Limit = 0.5
+        Ignition_Limit = 0.6
+        Transition_Start = 2.65
+        Transition_End = 2.75
+        Max_Power_Limit = S * (10 * np.log10(32.0 - 4.8) / np.log10(5.0) - 4.5 + (6*k))
+
+        # --- Zone 1: Off ---
+        if fp/S < Off_Limit:
             return (0,0)
-        
-        elif fp >= Min_curr/2 and fp < Min_curr:
-            I = (13*Min_curr/16/S+0.47-0.03*k)**(1/(0.8-0.01*k))/(3.5*k+8.7) #A
-            return (30, I)
 
-        elif fp >= Min_curr and fp < Max_curr:
-            I = (13*fp/16/S+0.47-0.03*k)**(1/(0.8-0.01*k))/(3.5*k+8.7) #A
-            return (30, I)
-        
-        elif fp >= Max_curr and fp < Min_volt:
-            if fp < Max_curr+(Min_volt-Max_curr)/2:
-                I = (13*Max_curr/16/S+0.47-0.03*k)**(1/(0.8-0.01*k))/(3.5*k+8.7)
-                return (30, I)
+        # --- Zone 2: Ignition ---
+        elif fp/S >= Off_Limit and fp/S < Ignition_Limit:
+            log_arg = (13.5 / (Ignition_Limit - 2.25))**6 - 1
+            I = 13.9 - (1/9.0) * np.log(max(log_arg, 1e-9))
+            return (30, min(max(I, 0.1), 10.0))
+
+        # --- Zone 3: Current-Controlled ---
+        elif fp/S >= Ignition_Limit and fp/S < Transition_Start:
+            log_arg = (13.5 / ((fp/S) - 2.25))**6 - 1
+            I = 13.9 - (1/9.0) * np.log(max(log_arg, 1e-9))
+            return (30, min(max(I, 0.1), 10.0))
+
+        # --- Zone 4: Transition ---
+        elif fp/S >= Transition_Start and fp/S < Transition_End:
+            transition_midpoint = Transition_Start + (Transition_End - Transition_Start) / 2
+            if fp/S < transition_midpoint:
+                log_arg = (13.5 / (Transition_Start - 2.25))**6 - 1
+                I = 13.9 - (1/9.0) * np.log(max(log_arg, 1e-9))
+                return (30, min(max(I, 0.1), 10.0))
             else:
-                V = (Min_volt/S+0.3475-0.725*k)**(1/(0.55+0.1*k))/(5.25-1.7*k)-0.5
-                return (V, 10)
+                V = 5.0**(((Transition_End) - (6*k) + 4.5) / 10.0) + 4.8
+                return (min(max(V, 0.0), 32.0), 10)
 
-        elif fp >= Min_volt and fp <= Max_volt:
-            V = (fp/S+0.3475-0.725*k)**(1/(0.55+0.1*k))/(5.25-1.7*k)-0.5
-            return (V, 10)
+        # --- Zone 5: Voltage-Controlled ---
+        elif fp/S >= Transition_End and fp/S < Max_Power_Limit:
+            V = 5.0**(((fp/S) - (6*k) + 4.5) / 10.0) + 4.8
+            return (min(max(V, 0.0), 32.0), 10)
 
-        elif fp > Max_volt:
-            return (30,10)
+        # --- Zone 6: Max Power ---
+        elif fp/S >= Max_Power_Limit:
+            return (32, 10)
 
 
-    def BulbSetting_BOLSIG_NewDC_Fix(self, fp, knob = 0.5, scale = 1.0):
-        """
-        Maps plasma frequency value in GHz to a current and voltage setting for
-        the DC power supplies
+    # def BulbSetting_BOLSIG_NewDC_Fix(self, fp, knob = 0.5, scale = 1.0):
+    #     """
+    #     Maps plasma frequency value in GHz to a current and voltage setting for
+    #     the DC power supplies
 
-        Args:
-            fp: plasma frequency in GHz (NOT rad/s)
-            knob: constant to tune experimental fit to lower and upper range of
-                  BOLSIG cases. knob = 0 is low end and knob = 1 is high end.
-            scale: Parameter that scales the overall plasma frequency values.
-        """
-        k = knob
-        S = scale
-        Min_curr = S*((16/13)*((8.7+k*3.5)*0.08)**(-k*0.01+0.8)+(-0.47+k*0.03))
-        Max_curr = S*((16/13)*((8.7+k*3.5)*0.2)**(-k*0.01+0.8)+(-0.47+k*0.03))
-        Min_volt = S*(((5.25-k*1.7)*(6+0.5))**(k*0.1+0.55)+(k*0.725-3.475))
-        Max_volt = S*(((5.25-k*1.7)*(30+0.5))**(k*0.1+0.55)+(k*0.725-3.475))
+    #     Args:
+    #         fp: plasma frequency in GHz (NOT rad/s)
+    #         knob: constant to tune experimental fit to lower and upper range of
+    #               BOLSIG cases. knob = 0 is low end and knob = 1 is high end.
+    #         scale: Parameter that scales the overall plasma frequency values.
+    #     """
+    #     k = knob
+    #     S = scale
+    #     Min_curr = S*((16/13)*((8.7+k*3.5)*0.08)**(-k*0.01+0.8)+(-0.47+k*0.03))
+    #     Max_curr = S*((16/13)*((8.7+k*3.5)*0.2)**(-k*0.01+0.8)+(-0.47+k*0.03))
+    #     Min_volt = S*(((5.25-k*1.7)*(6+0.5))**(k*0.1+0.55)+(k*0.725-3.475))
+    #     Max_volt = S*(((5.25-k*1.7)*(30+0.5))**(k*0.1+0.55)+(k*0.725-3.475))
         
-        if fp < Min_curr/2:
-            return (0,0)
+    #     if fp < Min_curr/2:
+    #         return (0,0)
         
-        elif fp >= Min_curr/2 and fp < Min_curr:
-            I = (13*Min_curr/16/S+0.47-0.03*k)**(1/(0.8-0.01*k))/(3.5*k+8.7) #A
-            return (30, I)
+    #     elif fp >= Min_curr/2 and fp < Min_curr:
+    #         I = (13*Min_curr/16/S+0.47-0.03*k)**(1/(0.8-0.01*k))/(3.5*k+8.7) #A
+    #         return (30, I)
 
-        elif fp >= Min_curr and fp < Max_curr:
-            I = (13*fp/16/S+0.47-0.03*k)**(1/(0.8-0.01*k))/(3.5*k+8.7) #A
-            return (30, I)
+    #     elif fp >= Min_curr and fp < Max_curr:
+    #         I = (13*fp/16/S+0.47-0.03*k)**(1/(0.8-0.01*k))/(3.5*k+8.7) #A
+    #         return (30, I)
         
-        elif fp >= Max_curr and fp < Min_volt:
-            if fp < Max_curr+(Min_volt-Max_curr)/2:
-                I = (13*Max_curr/16/S+0.47-0.03*k)**(1/(0.8-0.01*k))/(3.5*k+8.7)
-                return (30, I)
-            else:
-                V = (Min_volt/S+3.475-0.725*k)**(1/(0.55+0.1*k))/(5.25-1.7*k)-0.5
-                return (V, 10)
+    #     elif fp >= Max_curr and fp < Min_volt:
+    #         if fp < Max_curr+(Min_volt-Max_curr)/2:
+    #             I = (13*Max_curr/16/S+0.47-0.03*k)**(1/(0.8-0.01*k))/(3.5*k+8.7)
+    #             return (30, I)
+    #         else:
+    #             V = (Min_volt/S+3.475-0.725*k)**(1/(0.55+0.1*k))/(5.25-1.7*k)-0.5
+    #             return (V, 10)
 
-        elif fp >= Min_volt and fp <= Max_volt:
-            V = (fp/S+3.475-0.725*k)**(1/(0.55+0.1*k))/(5.25-1.7*k)-0.5
-            return (V, 10)
+    #     elif fp >= Min_volt and fp <= Max_volt:
+    #         V = (fp/S+3.475-0.725*k)**(1/(0.55+0.1*k))/(5.25-1.7*k)-0.5
+    #         return (V, 10)
 
-        elif fp > Max_volt:
-            return (30,10)
+    #     elif fp > Max_volt:
+    #         return (30,10)
 
 
     def Rho_to_Bulb(self, rho, wp_max, knob = 0.5, scale = 1.0,\
@@ -679,6 +745,65 @@ class PMMInSitu:
         return BulbSet
 
 
+    # def ArraySet_Rho(self, rho, wp_max, knob = 0.5, scale = 1.0,\
+    #                  ballast = 'New'):
+    #     """
+    #     Accepts optimal parameter array (MUST BE FLATTENED) and activates the
+    #     bulb array accordingly.
+
+    #     Args:
+    #         rho: optimal parameter array (flattened) from PMMInverse library
+    #         wp_max: Approximate maximum non-dimensionalized plasma frequency
+    #         knob: constant to tune experimental fit to lower and upper range of
+    #               BOLSIG cases. knob = 0 is low end and knob = 1 is high end.
+    #         scale: Parameter that scales the overall plasma frequency values.
+    #     """
+    #     BulbSet = self.Rho_to_Bulb_Fix(rho, wp_max, knob, scale, ballast)
+    #     if ballast == 'New':
+    #         activate = 20
+    #     else:
+    #         activate = 28
+
+    #     self.Set_Bulb_VI('all', activate, 10, verbose = False)
+    #     time.sleep(0.005)
+    #     try:
+    #         self.Activate_Bulb('all')
+    #     except:
+    #         print('Trouble activating bulbs, trying one more time')
+    #         time.sleep(1)
+    #         try:
+    #             self.Activate_Bulb('all')
+    #         except:
+    #             raise RuntimeError("Failed to activate bulbs twice, check"+\
+    #                     " config.")
+    #     time.sleep(1)
+    #     self.Set_Bulb_VI('all', activate-4, 10, verbose = False)
+
+    #     for i in range(rho.shape[0]):
+    #         not_set = True
+    #         tries = 0
+    #         while not_set and tries < 5:
+    #             try:
+    #                 self.Set_Bulb_VI(i+1, BulbSet[i,0], BulbSet[i,1])
+    #                 time.sleep(0.005)
+    #                 not_set = False
+    #             except:
+    #                 tries += 1
+    #                 print('Trouble setting bulb '+str(i+1)+', trying again')
+    #                 time.sleep(1)
+    #         if not_set:
+    #             try:
+    #                 self.Set_Bulb_VI(i+1, BulbSet[i,0], BulbSet[i,1])
+    #                 time.sleep(0.005)
+    #             except:
+    #                 self.Deactivate_Bulb('all')
+    #                 time.sleep(3)
+    #                 self.Deactivate_Bulb('all')
+    #                 raise RuntimeError("Failed to set bulb "+str(i+1)+\
+    #                                    " six times. Check config.")
+
+    #     return
+    
     def ArraySet_Rho(self, rho, wp_max, knob = 0.5, scale = 1.0,\
                      ballast = 'New'):
         """
@@ -700,43 +825,52 @@ class PMMInSitu:
 
         self.Set_Bulb_VI('all', activate, 10, verbose = False)
         time.sleep(0.005)
-        try:
-            self.Activate_Bulb('all')
-        except:
-            print('Trouble activating bulbs, trying one more time')
-            time.sleep(1)
-            try:
-                self.Activate_Bulb('all')
-            except:
-                raise RuntimeError("Failed to activate bulbs twice, check"+\
-                        " config.")
+        self.Activate_Bulb('all') # This is already parallel
         time.sleep(1)
         self.Set_Bulb_VI('all', activate-4, 10, verbose = False)
 
-        for i in range(rho.shape[0]):
-            not_set = True
-            tries = 0
-            while not_set and tries < 5:
-                try:
-                    self.Set_Bulb_VI(i+1, BulbSet[i,0], BulbSet[i,1])
-                    time.sleep(0.005)
-                    not_set = False
-                except:
-                    tries += 1
-                    print('Trouble setting bulb '+str(i+1)+', trying again')
-                    time.sleep(1)
-            if not_set:
-                try:
-                    self.Set_Bulb_VI(i+1, BulbSet[i,0], BulbSet[i,1])
-                    time.sleep(0.005)
-                except:
-                    self.Deactivate_Bulb('all')
-                    time.sleep(3)
-                    self.Deactivate_Bulb('all')
-                    raise RuntimeError("Failed to set bulb "+str(i+1)+\
-                                       " six times. Check config.")
+        port_to_addrs = self.config["serial_ports"]
+        
+        def process_port_for_set_vi(address_list, bulb_settings):
+            for addr in address_list:
+                bulb_index = addr - 1
+                V = bulb_settings[bulb_index, 0]
+                I = bulb_settings[bulb_index, 1]
+                
+                # Original retry loop logic
+                not_set = True
+                tries = 0
+                while not_set and tries < 5:
+                    try:
+                        self.Set_Bulb_VI(addr, V, I)
+                        time.sleep(0.005)
+                        not_set = False
+                    except:
+                        tries += 1
+                        print('Trouble setting bulb '+str(addr)+', trying again')
+                        time.sleep(1)
+                if not_set:
+                    try:
+                        self.Set_Bulb_VI(addr, V, I)
+                        time.sleep(0.005)
+                    except:
+                        self.Deactivate_Bulb('all')
+                        time.sleep(3)
+                        self.Deactivate_Bulb('all')
+                        raise RuntimeError("Failed to set bulb "+str(addr)+\
+                                           " six times. Check config.")
+
+        threads = []
+        for addr_list in port_to_addrs.values():
+            thread = threading.Thread(target=process_port_for_set_vi, args=(addr_list, BulbSet))
+            threads.append(thread)
+            thread.start()
+
+        for thread in threads:
+            thread.join()
 
         return
+    
 
 
     def Get_S21_S31(self):
