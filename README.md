@@ -1,27 +1,84 @@
-### InversePMMDesign
+# InversePMMDesign
 
-Library built on top of Ceviche (https://github.com/fancompute/ceviche) tailored for creating plasma metamaterial devices
-_____
+Library built on top of **ceviche** and **angler** (https://github.com/fancompute) 
+tailored for creating plasma metamaterial devices. This repo uses forks of these 
+project with portable sparse solver backends so it runs well on Apple Silicon, Intel, 
+and AMD.
 
-### Quick Tutorial
+---
 
-1. First, use the setup.py file to make sure you have all the dependencies and 'install' PMM. It would behoove you to do this in a seperate conda environment. _Note: The ceviche field solver uses the PARDISO sparse matrix solver; which is part of Intel's MKL poackage (pyMKL, a requirement for ceviche, is a wrapper for this) and is responsible for the fast parallel performance of the field solvers. If you are running on an HPC system, you will likely need to load an MKL module._
-~~~
-    (base)$ git clone https://github.com/StanfordPlasmaPhysics/InversePMMDesign
-    (base)$ cd InversePMMDesign
-    (base)$ conda create --name PMM python=3.7.10
-    (base)$ conda activate PMM
-    (PMM)$  python setup.py install
-    (PMM)$  pip install -e .
-~~~
+## Quickstart
 
-2. Next, get all the output directories ready
-~~~
-    (PMM)$ cd scripts
-    (PMM)$ python OutputDirs.py
-~~~
+We use a standard `pyproject.toml` build with `pip`. Create a fresh
+environment first.
 
-3. Now you're ready. Adjust the resolution and other parameters in the optimizations scripts and create some PMMs. Run everything with scripts/ as your working directory.
+### 1) Create and activate an environment
+
+Option A: conda
 ~~~
-    (PMM)$ python BentWaveguide10x10.py
+    conda create -n PMM python=3.10
+    conda activate PMM
 ~~~
+Option B: venv
+~~~
+    python -m venv .venv
+    source .venv/bin/activate   # Windows: .venv\Scripts\activate
+~~~
+### 2) Choose a solver backend
+
+- Apple Silicon (macOS arm64): prefer SuiteSparse/UMFPACK.
+- Intel/AMD (x86_64): prefer PARDISO via pypardiso.
+- Minimal install (SciPy SuperLU) works everywhere but is slower.
+
+Apple Silicon (recommended):
+~~~
+    # Install SciPy + SuiteSparse/UMFPACK via conda-forge:
+    conda install -c conda-forge scipy numpy scikit-umfpack suitesparse
+    pip install -e ".[solver-suitesparse]"
+~~~
+Intel/AMD (Linux/Windows, x86_64, recommended):
+~~~
+    pip install -e ".[solver-mkl]"
+~~~
+Minimal install (works everywhere, slower):
+~~~
+    pip install -e .
+~~~
+You can force a backend at runtime:
+ANGLER_SOLVER=pardiso or CEVICHE_SOLVER=pardiso (x86_64 only)
+ANGLER_SOLVER=scipy or CEVICHE_SOLVER=scipy
+
+### 3) Prepare output directories
+~~~
+    cd scripts
+    python OutputDirs.py
+~~~
+### 4) Run an example
+~~~
+    # From the scripts/ directory:
+    python BentWaveguide10x10.py
+~~~
+---
+
+## Notes on performance and portability
+
+- On x86_64, pypardiso bundles MKL PARDISO and is typically the
+  fastest direct solver for our FDFD matrices.
+- On Apple Silicon, MKL is not available natively; use
+  SuiteSparse/UMFPACK (solver-suitesparse) for excellent performance.
+- On HPC clusters, PETSc (solver-petsc) is supported; install
+  petsc4py via conda-forge.
+
+---
+
+## Developer workflow
+
+    # Install dev tools
+    pip install -e ".[dev]"
+
+    # Build sdist + wheel
+    python -m pip install --upgrade pip build
+    python -m build
+
+    # Run tests
+    pytest

@@ -1,0 +1,70 @@
+[build-system]
+requires = ["setuptools>=69", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "PMM"
+version = "0.1.0"
+description = "Plasma Metamaterial design tools."
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+authors = [
+    { name = "Jesse A. Rodriguez",
+      email = "jesse.rodriguez@oregonstate.edu" }
+]
+
+# Keep hard deps minimal and platform-neutral.
+# Solver backends are offered via extras below.
+dependencies = [
+    "numpy>=2.3,<2.4",
+    "scipy>=1.15,<1.16",
+    "matplotlib",
+    "autograd",
+    "scikit-image",
+    "minimalmodbus",
+    "pyserial",
+    "RsInstrument",
+    # Use your forks so the new sparse-solver logic is available.
+    "ceviche @ git+https://github.com/JesseRodriguez/ceviche"
+        "@sparse_solvers",
+    "angler @ git+https://github.com/JesseRodriguez/angler"
+        "@sparse_solvers",
+]
+
+[project.urls]
+Homepage = "https://github.com/Strongly-Coupled-Systems-Lab/PMM-Design"
+Source = "https://github.com/Strongly-Coupled-Systems-Lab/PMM-Design"
+Issues = "https://github.com/Strongly-Coupled-Systems-Lab/PMM-Design/issues"
+
+[tool.setuptools]
+package-dir = { "" = "." }
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["PMM*"]
+
+[project.optional-dependencies]
+dev = [
+    "build",
+    "twine",
+    "pytest",
+    "ruff",
+    "mypy",
+]
+
+# x86_64: fast direct solve via MKL PARDISO (bundled by pypardiso).
+solver-mkl = [
+    "pypardiso>=0.4",
+]
+
+# Apple Silicon or conda-forge users: SuiteSparse/UMFPACK.
+# Pip wheels for scikits.umfpack are spotty; conda-forge is recommended.
+solver-suitesparse = [
+    "scikits.umfpack",
+]
+
+# Optional HPC path (PETSc/MUMPS/Hypre). Typically via conda-forge.
+solver-petsc = [
+    "petsc4py>=3.20",
+]
