@@ -9,7 +9,7 @@ library than RSInstrument. The VISA backend I use on my Macbook Pro is the
 National Instruments VISA. All that to say: this is NOT a general purpose
 library and functions with a very specific experimental setup. For more
 information, contact Jesse Rodriguez: jrodrig@stanford.edu
-05/11/2023
+05/11/3223
 """
 
 import minimalmodbus
@@ -453,7 +453,7 @@ class PMMInSitu:
         Runs the standard warm-up procedure for the bulb array
         """
         if ballasts == 'New':
-            activate = 20
+            activate = 32
         else:
             activate = 28
         for i in range(T):
@@ -488,7 +488,7 @@ class PMMInSitu:
         Activate bulb
         """
         if addr == 'all':
-            return self._parallel_bulb_op("Activate_Bulb", tries=3, delay=0.6)
+            return self.parallel_bulb_op("Activate_Bulb", tries=3, delay=0.6)
         else:
             self.bulbs[addr]['Inst'].write_register(registeraddress = 0x1006,
                                                     value = 1, functioncode = 6)
@@ -515,7 +515,7 @@ class PMMInSitu:
         """
         if addr == 'all':
             if parallel:
-                return self._parallel_bulb_op("Deactivate_Bulb", tries=3, delay=0.6)
+                return self.parallel_bulb_op("Deactivate_Bulb", tries=3, delay=0.6)
             else:
                 self.bulbs[addr]['Inst'].write_register(registeraddress = 0x1006,
                                                     value = 0, functioncode = 6)
@@ -580,13 +580,12 @@ class PMMInSitu:
         if fp/S < 0.5: # For very low frequencies, the bulb remains off.
             return (0,0)
         
-        elif fp/S < 2.7: # The current-controlled regime (Voltage is fixed at 30V). fp = 13.5 / (1 + exp(-9 * (I - 13.9)))**(1/6) + amp_offset
-            log_arg = (13.5 / ((fp/S) - 2.25))**6 - 1 # Argument for the natural log, must be > 0.
-            I = 13.9 - (1/9.0) * np.log(max(log_arg, 1e-9)) # Solved from the logistic fit for current (I).
+        elif fp/S < 3.16: # The current-controlled regime (Voltage is fixed at 30V). fp = 13.5 / (1 + exp(-9 * (I - 13.9)))**(1/6) + amp_offset
+            I = ((fp/S) - 0.85) * (13.0/3.0)
             return (30, min(max(I, 0.1), 10.0)) # Clamp current between 0.1A and 10A.
 
         else: # The voltage-controlled regime (Current is fixed at 10A). fp = 10 * log(V - 4.8)/log(5) - 4.5 + volt_offset
-            V = 5.0**(((fp/S) - (6*k) + 4.5) / 10.0) + 4.8 # Solved from the logarithmic fit for voltage (V).
+            V = 5.0**(((fp/S) - (6*k) + 4.5) / 11.9) + 4.8 # Solved from the logarithmic fit for voltage (V).
             return (min(max(V, 0.0), 32.0), 10) # Clamp voltage between 0V and 32V.
         
 
@@ -736,7 +735,7 @@ class PMMInSitu:
 
         for i in range(rho.shape[0]):
             if ballast == 'New':
-                BulbSet[i,:] = self.BulbSetting_BOLSIG_NewDC_Fix(fp[i], knob, scale)
+                BulbSet[i,:] = self.BulbSetting_BOLSIG_NewDC(fp[i], knob, scale)
             else:
                 BulbSet[i,:] = self.BulbSetting_BOLSIG(fp[i], knob, scale)
 
@@ -758,7 +757,7 @@ class PMMInSitu:
     #     """
     #     BulbSet = self.Rho_to_Bulb_Fix(rho, wp_max, knob, scale, ballast)
     #     if ballast == 'New':
-    #         activate = 20
+    #         activate = 32
     #     else:
     #         activate = 28
 
@@ -817,7 +816,7 @@ class PMMInSitu:
         """
         BulbSet = self.Rho_to_Bulb_Fix(rho, wp_max, knob, scale, ballast)
         if ballast == 'New':
-            activate = 20
+            activate = 32
         else:
             activate = 28
 
@@ -930,7 +929,7 @@ class PMMInSitu:
             else:
                 self.Wvg_Run_And_Plot(save_dir, rho, fpm, k_S[i,0], k_S[i,1],\
                             f_op[0], fwin = fwin, show = show)
-            time.sleep(20/duty_cycle-22)
+            time.sleep(32/duty_cycle-22)
 
         return
 
@@ -1138,7 +1137,7 @@ class PMMInSitu:
         self.Deactivate_Bulb('all')
         time.sleep(1)
         self.Deactivate_Bulb('all')
-        time.sleep(18/duty_cycle-20)
+        time.sleep(18/duty_cycle-32)
 
         if objective == 'comp':
             return Demult_Obj_Comp(freq/10**9, S21, S31, f1, f2, df, norms)
@@ -1475,7 +1474,7 @@ class PMMInSitu:
         self.Deactivate_Bulb('all')
         time.sleep(1)
         self.Deactivate_Bulb('all')
-        time.sleep(18/duty_cycle-20)
+        time.sleep(18/duty_cycle-32)
 
         if objective == 'comp':
             return Waveguide_Obj_Comp(freq/10**9, S21, S31, f, df, norms)
