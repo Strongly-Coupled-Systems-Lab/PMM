@@ -9,7 +9,7 @@ library than RSInstrument. The VISA backend I use on my Macbook Pro is the
 National Instruments VISA. All that to say: this is NOT a general purpose
 library and functions with a very specific experimental setup. For more
 information, contact Jesse Rodriguez: jrodrig@stanford.edu
-05/11/3223
+05/11/2423
 """
 
 import minimalmodbus
@@ -384,7 +384,7 @@ class PMMInSitu:
 
         Args:
             addr: int, bulb address
-            V: float, bulb voltage in [0,32] (volts)
+            V: float, bulb voltage in [0,24] (volts)
             I: float, bulb current in [0,10] (amps)
         """
         if addr == 'all':
@@ -416,7 +416,7 @@ class PMMInSitu:
         
         Args:
             addr: int, bulb address
-            V: float, bulb voltage in [0,32] (volts)
+            V: float, bulb voltage in [0,24] (volts)
             I: float, bulb current in [0,10] (amps)
             t: float, time to stay activated (seconds). Default is to stay on
                indefinitely.
@@ -453,7 +453,7 @@ class PMMInSitu:
         Runs the standard warm-up procedure for the bulb array
         """
         if ballasts == 'New':
-            activate = 32
+            activate = 24
         else:
             activate = 28
         for i in range(T):
@@ -586,110 +586,78 @@ class PMMInSitu:
 
         else: # The voltage-controlled regime (Current is fixed at 10A). fp = 10 * log(V - 4.8)/log(5) - 4.5 + volt_offset
             V = 5.0**(((fp/S) - (6*k) + 4.5) / 11.9) + 4.8 # Solved from the logarithmic fit for voltage (V).
-            return (min(max(V, 0.0), 32.0), 10) # Clamp voltage between 0V and 32V.
+            return (min(max(V, 0.0), 24.0), 10) # Clamp voltage between 0V and 24V.
         
 
     def BulbSetting_BOLSIG_NewDC(self, fp, knob = 0.5, scale = 1.0):
         """
-        Maps plasma frequency value in GHz to a current and voltage setting for
-        the DC power supplies. This version uses the new data fits but is structured
-        to emulate the original six-zone operational logic.
+        Maps plasma frequency (fp) in GHz to DC power supply voltage and current
+        settings using a min/max envelope structure based on new experimental fits.
 
         Args:
-            fp: plasma frequency in GHz (NOT rad/s)
-            knob: constant to tune experimental fit to lower and upper range of
-                  BOLSIG cases. knob = 0 is low end and knob = 1 is high end.
-            scale: Parameter that scales the overall plasma frequency values.
+            fp (float): Target plasma frequency in GHz.
+            knob (float): Tunes the fit between the lower (0.0) and upper (1.0) bounds.
+            scale (float): Scales the overall plasma frequency values.
         """
         k = knob
         S = scale
+        fp_scaled = fp / S
 
-        Off_Limit = 0.5
-        Ignition_Limit = 0.6
-        Transition_Start = 2.65
-        Transition_End = 2.75
-        Max_Power_Limit = S * (10 * np.log10(32.0 - 4.8) / np.log10(5.0) - 4.5 + (6*k))
+        # Current Fit: fp = (3/13) * I + B_offset
+        B_offset = 1.7 * k
 
-        # --- Zone 1: Off ---
-        if fp/S < Off_Limit:
-            return (0,0)
+        # Voltage Fit: fp = A_coeff * log(V - 4.8)/log(5) - 4.5
+        A_coeff = 10.0 + 3.8 * k
 
-        # --- Zone 2: Ignition ---
-        elif fp/S >= Off_Limit and fp/S < Ignition_Limit:
-            log_arg = (13.5 / (Ignition_Limit - 2.25))**6 - 1
-            I = 13.9 - (1/9.0) * np.log(max(log_arg, 1e-9))
-            return (30, min(max(I, 0.1), 10.0))
+        I_MIN_AMP = 0.1   # Minimum reliable operating current
+        I_MAX_AMP = 10.0  # Maximum supply current
+        V_MIN_VOLT = 6.0  # Minimum reliable operating voltage
+        V_MAX_VOLT = 24.0 # Maximum supply voltage
 
-        # --- Zone 3: Current-Controlled ---
-        elif fp/S >= Ignition_Limit and fp/S < Transition_Start:
-            log_arg = (13.5 / ((fp/S) - 2.25))**6 - 1
-            I = 13.9 - (1/9.0) * np.log(max(log_arg, 1e-9))
-            return (30, min(max(I, 0.1), 10.0))
+        # Calculate the fp values that correspond to these physical boundaries
+        Min_curr_fp = (3/13) * I_MIN_AMP + B_offset
+        Max_curr_fp = (3/13) * I_MAX_AMP + B_offset
+        
+        # The log(V - 4.8) term requires V > 4.8
+        if V_MIN_VOLT <= 4.8:
+            Min_volt_fp = float('inf') # Set boundary high to effectively skip voltage control
+        else:
+            Min_volt_fp = A_coeff * np.log(V_MIN_VOLT - 4.8) / np.log(5) - 4.5
+        Max_volt_fp = A_coeff * np.log(V_MAX_VOLT - 4.8) / np.log(5) - 4.5
+        
+        # Zone 1: Off
+        if fp_scaled < Min_curr_fp / 2:
+            return (0, 0)
+        
+        # Zone 2: Ignition
+        elif fp_scaled < Min_curr_fp:
+            I = (Min_curr_fp - B_offset) * (13/3)
+            return (24, I)
 
-        # --- Zone 4: Transition ---
-        elif fp/S >= Transition_Start and fp/S < Transition_End:
-            transition_midpoint = Transition_Start + (Transition_End - Transition_Start) / 2
-            if fp/S < transition_midpoint:
-                log_arg = (13.5 / (Transition_Start - 2.25))**6 - 1
-                I = 13.9 - (1/9.0) * np.log(max(log_arg, 1e-9))
-                return (30, min(max(I, 0.1), 10.0))
+        # Zone 3: Current-Controlled
+        elif fp_scaled < Max_curr_fp:
+            I = (fp_scaled - B_offset) * (13/3)
+            return (24, I)
+
+        # Zone 4: Transition
+        elif fp_scaled < Min_volt_fp:
+            midpoint = Max_curr_fp + (Min_volt_fp - Max_curr_fp) / 2
+            if fp_scaled < midpoint:
+                return (24, I_MAX_AMP)
             else:
-                V = 5.0**(((Transition_End) - (6*k) + 4.5) / 10.0) + 4.8
-                return (min(max(V, 0.0), 32.0), 10)
+                return (V_MIN_VOLT, I_MAX_AMP)
 
-        # --- Zone 5: Voltage-Controlled ---
-        elif fp/S >= Transition_End and fp/S < Max_Power_Limit:
-            V = 5.0**(((fp/S) - (6*k) + 4.5) / 10.0) + 4.8
-            return (min(max(V, 0.0), 32.0), 10)
+        # Zone 5: Voltage-Controlled
+        elif fp_scaled <= Max_volt_fp:
+            V = 5**((fp_scaled + 4.5) / A_coeff) + 4.8
+            return (min(max(V, V_MIN_VOLT), V_MAX_VOLT), I_MAX_AMP)
 
-        # --- Zone 6: Max Power ---
-        elif fp/S >= Max_Power_Limit:
-            return (32, 10)
+        # Zone 6: Max Power
+        else: # fp_scaled > Max_volt_fp
+            return (V_MAX_VOLT, I_MAX_AMP)
 
 
-    # def BulbSetting_BOLSIG_NewDC_Fix(self, fp, knob = 0.5, scale = 1.0):
-    #     """
-    #     Maps plasma frequency value in GHz to a current and voltage setting for
-    #     the DC power supplies
-
-    #     Args:
-    #         fp: plasma frequency in GHz (NOT rad/s)
-    #         knob: constant to tune experimental fit to lower and upper range of
-    #               BOLSIG cases. knob = 0 is low end and knob = 1 is high end.
-    #         scale: Parameter that scales the overall plasma frequency values.
-    #     """
-    #     k = knob
-    #     S = scale
-    #     Min_curr = S*((16/13)*((8.7+k*3.5)*0.08)**(-k*0.01+0.8)+(-0.47+k*0.03))
-    #     Max_curr = S*((16/13)*((8.7+k*3.5)*0.2)**(-k*0.01+0.8)+(-0.47+k*0.03))
-    #     Min_volt = S*(((5.25-k*1.7)*(6+0.5))**(k*0.1+0.55)+(k*0.725-3.475))
-    #     Max_volt = S*(((5.25-k*1.7)*(30+0.5))**(k*0.1+0.55)+(k*0.725-3.475))
-        
-    #     if fp < Min_curr/2:
-    #         return (0,0)
-        
-    #     elif fp >= Min_curr/2 and fp < Min_curr:
-    #         I = (13*Min_curr/16/S+0.47-0.03*k)**(1/(0.8-0.01*k))/(3.5*k+8.7) #A
-    #         return (30, I)
-
-    #     elif fp >= Min_curr and fp < Max_curr:
-    #         I = (13*fp/16/S+0.47-0.03*k)**(1/(0.8-0.01*k))/(3.5*k+8.7) #A
-    #         return (30, I)
-        
-    #     elif fp >= Max_curr and fp < Min_volt:
-    #         if fp < Max_curr+(Min_volt-Max_curr)/2:
-    #             I = (13*Max_curr/16/S+0.47-0.03*k)**(1/(0.8-0.01*k))/(3.5*k+8.7)
-    #             return (30, I)
-    #         else:
-    #             V = (Min_volt/S+3.475-0.725*k)**(1/(0.55+0.1*k))/(5.25-1.7*k)-0.5
-    #             return (V, 10)
-
-    #     elif fp >= Min_volt and fp <= Max_volt:
-    #         V = (fp/S+3.475-0.725*k)**(1/(0.55+0.1*k))/(5.25-1.7*k)-0.5
-    #         return (V, 10)
-
-    #     elif fp > Max_volt:
-    #         return (30,10)
+    
 
 
     def Rho_to_Bulb(self, rho, wp_max, knob = 0.5, scale = 1.0,\
@@ -742,64 +710,6 @@ class PMMInSitu:
         return BulbSet
 
 
-    # def ArraySet_Rho(self, rho, wp_max, knob = 0.5, scale = 1.0,\
-    #                  ballast = 'New'):
-    #     """
-    #     Accepts optimal parameter array (MUST BE FLATTENED) and activates the
-    #     bulb array accordingly.
-
-    #     Args:
-    #         rho: optimal parameter array (flattened) from PMMInverse library
-    #         wp_max: Approximate maximum non-dimensionalized plasma frequency
-    #         knob: constant to tune experimental fit to lower and upper range of
-    #               BOLSIG cases. knob = 0 is low end and knob = 1 is high end.
-    #         scale: Parameter that scales the overall plasma frequency values.
-    #     """
-    #     BulbSet = self.Rho_to_Bulb_Fix(rho, wp_max, knob, scale, ballast)
-    #     if ballast == 'New':
-    #         activate = 32
-    #     else:
-    #         activate = 28
-
-    #     self.Set_Bulb_VI('all', activate, 10, verbose = False)
-    #     time.sleep(0.005)
-    #     try:
-    #         self.Activate_Bulb('all')
-    #     except:
-    #         print('Trouble activating bulbs, trying one more time')
-    #         time.sleep(1)
-    #         try:
-    #             self.Activate_Bulb('all')
-    #         except:
-    #             raise RuntimeError("Failed to activate bulbs twice, check"+\
-    #                     " config.")
-    #     time.sleep(1)
-    #     self.Set_Bulb_VI('all', activate-4, 10, verbose = False)
-
-    #     for i in range(rho.shape[0]):
-    #         not_set = True
-    #         tries = 0
-    #         while not_set and tries < 5:
-    #             try:
-    #                 self.Set_Bulb_VI(i+1, BulbSet[i,0], BulbSet[i,1])
-    #                 time.sleep(0.005)
-    #                 not_set = False
-    #             except:
-    #                 tries += 1
-    #                 print('Trouble setting bulb '+str(i+1)+', trying again')
-    #                 time.sleep(1)
-    #         if not_set:
-    #             try:
-    #                 self.Set_Bulb_VI(i+1, BulbSet[i,0], BulbSet[i,1])
-    #                 time.sleep(0.005)
-    #             except:
-    #                 self.Deactivate_Bulb('all')
-    #                 time.sleep(3)
-    #                 self.Deactivate_Bulb('all')
-    #                 raise RuntimeError("Failed to set bulb "+str(i+1)+\
-    #                                    " six times. Check config.")
-
-    #     return
     
     def ArraySet_Rho(self, rho, wp_max, knob = 0.5, scale = 1.0,\
                      ballast = 'New'):
@@ -816,7 +726,7 @@ class PMMInSitu:
         """
         BulbSet = self.Rho_to_Bulb_Fix(rho, wp_max, knob, scale, ballast)
         if ballast == 'New':
-            activate = 32
+            activate = 24
         else:
             activate = 28
 
@@ -929,7 +839,7 @@ class PMMInSitu:
             else:
                 self.Wvg_Run_And_Plot(save_dir, rho, fpm, k_S[i,0], k_S[i,1],\
                             f_op[0], fwin = fwin, show = show)
-            time.sleep(32/duty_cycle-22)
+            time.sleep(24/duty_cycle-22)
 
         return
 
@@ -1137,7 +1047,7 @@ class PMMInSitu:
         self.Deactivate_Bulb('all')
         time.sleep(1)
         self.Deactivate_Bulb('all')
-        time.sleep(18/duty_cycle-32)
+        time.sleep(18/duty_cycle-24)
 
         if objective == 'comp':
             return Demult_Obj_Comp(freq/10**9, S21, S31, f1, f2, df, norms)
@@ -1474,7 +1384,7 @@ class PMMInSitu:
         self.Deactivate_Bulb('all')
         time.sleep(1)
         self.Deactivate_Bulb('all')
-        time.sleep(18/duty_cycle-32)
+        time.sleep(18/duty_cycle-24)
 
         if objective == 'comp':
             return Waveguide_Obj_Comp(freq/10**9, S21, S31, f, df, norms)

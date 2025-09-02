@@ -14,7 +14,8 @@ serial_ports:
   /dev/tty.usbserial-AB0L8UJG: [26,27,28,29,30,31,32,33,34,35,36,37,38,39,40,41,42,43,44,45,46,47,48,49,50] #slave addresses associated with this usb port
   /dev/tty.usbserial-AB0L83BJ: [51,52,53,54,55,56,57,58,59,60,61,62,63,64,65,66,67,68,69,70,71,72,73,74,75] #slave addresses associated with this usb port
   /dev/tty.usbserial-A10KCDZJ: [76,77,78,79,80,81,82,83,84,85,86,87,88,89,90,91,92,93,94,95,96,97,98,99,100] #slave addresses associated with this usb port
-VNA: 'USB0::0x0AAD::0x01C0::101795::INSTR' #VNA resource address for RSInstrument
+#VNA: 'USB0::0x0AAD::0x01C0::101795::INSTR' #VNA resource address for RSInstrument
+VNA: 'USB0::0x0AAD::0x01C0::101603::INSTR' #VNA resource address for RSInstrument
 env:
   name: 'ceviche'
   type: 'anaconda'
