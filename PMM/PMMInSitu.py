@@ -368,14 +368,83 @@ class PMMInSitu:
             thread.join() #wait until threads finished
         print(f"Finished '{cmd_name}' on all ports.")            
     
-    def Address(self, coords):
-        """
-        Takes array coordinates and returns a bulb address
+    # def Address(self, coords):
+    #     """
+    #     Takes array coordinates and returns a bulb address. 
+    #     THIS IS THE OLD VERSION.
 
-        Args:
-            coords: tuple/list; e.g. (i,j)
+    #     Args:
+    #         coords: tuple/list; e.g. (i,j)
+    #     """
+    #     return (coords[0]+self.config['array-x']*coords[1])
+    
+    def Address(self, radius):
         """
-        return (coords[0]+self.config['array-x']*coords[1])
+        Generates axial coordinates for a hexagon of a given radius.
+        The radius determines the number of bulbs on each side.
+        For 6 bulbs per side, radius = 5.
+        """
+        coords = []
+        for r in range(-radius, radius + 1):
+            for q in range(max(-radius, -r - radius), min(radius, -r + radius) + 1):
+                coords.append((q, r))
+        return coords
+
+    def plot_Address(self, radius=5, pause=0.03):
+        """
+        Probes the status of each bulb and plots them on a hexagonal grid.
+        A radius of 5 corresponds to a hexagon with 6 bulbs per side (91 total).
+        """
+        #PMM.plot_Addresss(radius=5)
+        
+        # Get all bulb addresses in the order they appear in the config file
+        all_addrs = [addr for port_addrs in self.config['serial_ports'].values() for addr in port_addrs]
+        
+        coords = self.Address(radius)
+        num_bulbs_in_hex = len(coords)
+        
+        if len(all_addrs) < num_bulbs_in_hex:
+            print(f"Warning: Config file has {len(all_addrs)} bulbs, but a hexagon of radius {radius} requires {num_bulbs_in_hex}.")
+            num_bulbs_in_hex = len(all_addrs)
+
+        addrs_to_plot = all_addrs[:num_bulbs_in_hex]
+        addr_coord_map = dict(zip(addrs_to_plot, coords))
+
+        # --- Probe bulb status ---
+        on_set = set()
+        print(f"Checking status of {num_bulbs_in_hex} bulbs...")
+        for addr in addrs_to_plot:
+            try:
+                inst = self.bulbs[addr]['Inst']
+                if inst.read_register(0x1004) & 0x0001: # Check ON/OFF 
+                    on_set.add(addr)
+            except Exception as e:
+                # This can happen if a bulb is unresponsive
+                pass 
+            time.sleep(pause)
+
+        xs, ys, labels, colors = [], [], [], []
+        for addr, (q, r) in addr_coord_map.items():
+            # Convert axial hex coords to cartesian (x,y) for plotting
+            x = (q + r / 2.0) * np.sqrt(3)
+            y = (3.0 / 2.0) * r
+            xs.append(x)
+            ys.append(y)
+            labels.append(addr)
+            colors.append('black' if addr in on_set else 'white')
+        
+        fig, ax = plt.subplots(figsize=(10, 10))
+        ax.scatter(xs, ys, s=500, c=colors, edgecolors='black', linewidths=1.5)
+
+        for i, label in enumerate(labels):
+            text_color = 'white' if colors[i] == 'black' else 'black'
+            ax.text(xs[i], ys[i], str(label), ha='center', va='center', color=text_color, fontsize=8, weight='bold')
+
+        ax.set_aspect('equal')
+        ax.axis('off')
+        ax.set_title(f"{num_bulbs_in_hex}-Bulb Hexagon (Side Length: {radius+1})", fontsize=16)
+        plt.tight_layout()
+        plt.show()
 
 
     def Set_Bulb_VI(self, addr, V, I, verbose = True):
