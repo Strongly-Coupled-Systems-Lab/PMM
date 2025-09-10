@@ -21,9 +21,11 @@ serial_ports:
   /dev/tty.usbserial-B001K6BU: [71, 72, 73, 74, 75, 76, 77, 78, 79, 80]
 
   /dev/tty.usbserial-B0013LEA: [81, 82, 83, 84, 85, 86, 87, 88, 89, 90]
-  /dev/tty.usbserial-B00295EU: [91, 92, 93, 94, 95, 96, 97, 98, 99, 100]
+  /dev/tty.usbserial-B00295EU: [91]
 
-VNA: 'USB0::0x0AAD::0x0119::022019943::0::INSTR' #VNA resource address for RSInstrument
+#VNA: 'USB0::0x0AAD::0x0119::022019943::0::INSTR' #VNA resource address for RSInstrument
+VNA: 'USB0::0x0AAD::0x01C0::101603::INSTR' #VNA resource address for RSInstrument
+
 env:
   name: 'PMM'
   type: 'anaconda'

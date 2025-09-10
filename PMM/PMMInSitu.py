@@ -9,7 +9,7 @@ library than RSInstrument. The VISA backend I use on my Macbook Pro is the
 National Instruments VISA. All that to say: this is NOT a general purpose
 library and functions with a very specific experimental setup. For more
 information, contact Jesse Rodriguez: jrodrig@stanford.edu
-05/11/2423
+05/11/2023
 """
 
 import minimalmodbus
@@ -28,7 +28,7 @@ import threading
 ###############################################################################
 ## Utility functions and globals
 ###############################################################################
-c = 299792458
+c = 299792058
 e = 1.60217662*10**(-19)
 epso = 8.8541878128*10**(-12)
 muo = 4*np.pi*10**(-7)
@@ -453,7 +453,7 @@ class PMMInSitu:
 
         Args:
             addr: int, bulb address
-            V: float, bulb voltage in [0,24] (volts)
+            V: float, bulb voltage in [0,20] (volts)
             I: float, bulb current in [0,10] (amps)
         """
         if addr == 'all':
@@ -485,12 +485,12 @@ class PMMInSitu:
         
         Args:
             addr: int, bulb address
-            V: float, bulb voltage in [0,24] (volts)
+            V: float, bulb voltage in [0,20] (volts)
             I: float, bulb current in [0,10] (amps)
             t: float, time to stay activated (seconds). Default is to stay on
                indefinitely.
         """
-        self.Set_Bulb_VI(addr, 28, 10, verbose)
+        self.Set_Bulb_VI(addr, 12, 10, verbose)
         self.Activate_Bulb(addr)
         time.sleep(0.3)
         self.Set_Bulb_VI(addr, V, I, verbose)
@@ -522,9 +522,9 @@ class PMMInSitu:
         Runs the standard warm-up procedure for the bulb array
         """
         if ballasts == 'New':
-            activate = 24
+            activate = 20
         else:
-            activate = 28
+            activate = 12
         for i in range(T):
             print("Warmup cycle", i+1)
             self.Set_Bulb_VI('all', activate, 10, verbose = False)
@@ -649,13 +649,13 @@ class PMMInSitu:
         if fp/S < 0.5: # For very low frequencies, the bulb remains off.
             return (0,0)
         
-        elif fp/S < 3.16: # The current-controlled regime (Voltage is fixed at 30V). fp = 13.5 / (1 + exp(-9 * (I - 13.9)))**(1/6) + amp_offset
+        elif fp/S < 3.16: # The current-controlled regime (Voltage is fixed at 20V). fp = 13.5 / (1 + exp(-9 * (I - 13.9)))**(1/6) + amp_offset
             I = ((fp/S) - 0.85) * (13.0/3.0)
-            return (30, min(max(I, 0.1), 10.0)) # Clamp current between 0.1A and 10A.
+            return (20, min(max(I, 0.1), 10.0)) # Clamp current between 0.1A and 10A.
 
         else: # The voltage-controlled regime (Current is fixed at 10A). fp = 10 * log(V - 4.8)/log(5) - 4.5 + volt_offset
             V = 5.0**(((fp/S) - (6*k) + 4.5) / 11.9) + 4.8 # Solved from the logarithmic fit for voltage (V).
-            return (min(max(V, 0.0), 24.0), 10) # Clamp voltage between 0V and 24V.
+            return (min(max(V, 0.0), 20.0), 10) # Clamp voltage between 0V and 20V.
         
 
     def BulbSetting_BOLSIG_NewDC(self, fp, knob = 0.5, scale = 1.0):
@@ -681,7 +681,7 @@ class PMMInSitu:
         I_MIN_AMP = 0.1   # Minimum reliable operating current
         I_MAX_AMP = 10.0  # Maximum supply current
         V_MIN_VOLT = 6.0  # Minimum reliable operating voltage
-        V_MAX_VOLT = 24.0 # Maximum supply voltage
+        V_MAX_VOLT = 20.0 # Maximum supply voltage
 
         # Calculate the fp values that correspond to these physical boundaries
         Min_curr_fp = (3/13) * I_MIN_AMP + B_offset
@@ -701,18 +701,18 @@ class PMMInSitu:
         # Zone 2: Ignition
         elif fp_scaled < Min_curr_fp:
             I = (Min_curr_fp - B_offset) * (13/3)
-            return (24, I)
+            return (20, I)
 
         # Zone 3: Current-Controlled
         elif fp_scaled < Max_curr_fp:
             I = (fp_scaled - B_offset) * (13/3)
-            return (24, I)
+            return (20, I)
 
         # Zone 4: Transition
         elif fp_scaled < Min_volt_fp:
             midpoint = Max_curr_fp + (Min_volt_fp - Max_curr_fp) / 2
             if fp_scaled < midpoint:
-                return (24, I_MAX_AMP)
+                return (20, I_MAX_AMP)
             else:
                 return (V_MIN_VOLT, I_MAX_AMP)
 
@@ -795,9 +795,9 @@ class PMMInSitu:
         """
         BulbSet = self.Rho_to_Bulb_Fix(rho, wp_max, knob, scale, ballast)
         if ballast == 'New':
-            activate = 24
+            activate = 20
         else:
-            activate = 28
+            activate = 12
 
         self.Set_Bulb_VI('all', activate, 10, verbose = False)
         time.sleep(0.005)
@@ -853,26 +853,38 @@ class PMMInSitu:
         Gets the freq array, S21 and S31 from the R&S VNA. Make sure the VNA is
         in the measurement state you want PRIOR to running this function. In 
         our case, that is with our cal set, 10000 points, Avg. factor 10.
-
-        Args:
         """
-        instr = RsInstrument(self.VNA)
+        max_attempts = 6
+        for attempt in range(max_attempts):
+            try:
+                instr = RsInstrument(self.VNA)
 
-        instr.write_str('TRIGger1:SEQuence:SOURce IMM')
-        time.sleep(7)
-        S21 = np.array(list(map(str,\
-                instr.query_str('CALC1:DATA:TRAC? "Trc1", FDAT').split(','))),\
-                                dtype = float)
-        S31 = np.array(list(map(str,\
-                instr.query_str('CALC1:DATA:TRAC? "Trc2", FDAT').split(','))),\
-                                dtype = float)
-        freq = np.array(list(map(str,\
-                instr.query_str('CALC1:DATA:STIM?').split(','))), dtype = float)
-        instr.write_str('TRIGger1:SEQuence:SOURce MAN')
-        instr.close()
+                instr.write_str('TRIGger1:SEQuence:SOURce IMM')
+                time.sleep(7)
+                S21_str = instr.query_str('CALC1:DATA:TRAC? "Trc1", FDAT')
+                S31_str = instr.query_str('CALC1:DATA:TRAC? "Trc2", FDAT')
+                freq_str = instr.query_str('CALC1:DATA:STIM?')
+                
+                instr.write_str('TRIGger1:SEQuence:SOURce MAN')
+                instr.close()
+                
+                # Check for valid, non-empty responses before converting
+                if S21_str and S31_str and freq_str:
+                    S21 = np.array(S21_str.split(','), dtype=float)
+                    S31 = np.array(S31_str.split(','), dtype=float)
+                    freq = np.array(freq_str.split(','), dtype=float)
+                    return freq, S21, S31
+                else:
+                    raise ValueError("VNA returned empty data.")
 
-        return freq, S21, S31
-
+            except Exception as e:
+                print(f"Warning: VNA communication failed on attempt {attempt + 1}/{max_attempts}. Error: {e}")
+                if attempt < max_attempts - 1:
+                    time.sleep(2)  # Wait for 2 seconds before retrying
+                else:
+                    # print("Error: VNA communication failed after multiple attempts. Returning empty arrays.")
+                    # return np.array([]), np.array([]), np.array([])
+                    raise RuntimeError("VNA communication failed after multiple attempts. Check VNA connection and VISA settings.")
 
     def Test_Comp_Rho(self, rho, fpm, k_S = [], f_op = [], fwin = [],\
                       wu = 10, save_dir = './', duty_cycle = 0.5, show = True):
@@ -908,7 +920,7 @@ class PMMInSitu:
             else:
                 self.Wvg_Run_And_Plot(save_dir, rho, fpm, k_S[i,0], k_S[i,1],\
                             f_op[0], fwin = fwin, show = show)
-            time.sleep(24/duty_cycle-22)
+            time.sleep(20/duty_cycle-22)
 
         return
 
@@ -1088,6 +1100,29 @@ class PMMInSitu:
                         %(e+1, epochs, t2-t1, o))
             print("="*80)
 
+            # --- MODIFICATION ---
+            # Plot intermediate results after every 5 epochs
+            if (e + 1) % 5 == 0 and e < epochs - 1:
+                print(f"--- Plotting intermediate results for Epoch {e + 1} ---")
+                
+                # Plot objective function progress
+                obj_savepath = progress_dir + f'/obj_Wvg_{f:.1f}GHz_fpm_{fpm:.1f}GHz{ID}_epoch_{e+1}.pdf'
+                self.Plot_Obj(obj_savepath, np.array(obj), show=show)
+                
+                # Take and plot a snapshot of the best S-parameter performance so far
+                print("Taking a snapshot measurement of the best state so far...")
+                try:
+                    self.ArraySet_Rho(best_rho_so_far, self.f_a(fpm), knob=k, scale=S)
+                    time.sleep(1)
+                    freq_snap, s21_snap, s31_snap = self.Get_S21_S31()
+                finally:
+                    self.Deactivate_Bulb('all') # Ensure bulbs are always turned off
+                
+                s_param_savepath = progress_dir + f'/Wvg_{f:.1f}GHz_fpm_{fpm:.1f}GHz_k{k:.1f}_S{S:.1f}_epoch_{e+1}.pdf'
+                self.Trans_Plot_2Port(s_param_savepath, freq_snap, s21_snap, s31_snap, fpm, k, S, f=[f], f_win=fwin, show=show)
+                print("--- Intermediate plots saved. Continuing optimization... ---")
+            # --- END MODIFICATION ---
+            
             self.Save_Params(rho_evolution, progress_dir+\
                     '/rho_Demult_%.1f_%.1fGHz_fpm_%.1fGHz'%(f1,f2,fpm)+ID+'.csv')
             self.Save_Params(np.array(obj), progress_dir+\
@@ -1116,7 +1151,7 @@ class PMMInSitu:
         self.Deactivate_Bulb('all')
         time.sleep(1)
         self.Deactivate_Bulb('all')
-        time.sleep(18/duty_cycle-24)
+        time.sleep(18/duty_cycle-20)
 
         if objective == 'comp':
             return Demult_Obj_Comp(freq/10**9, S21, S31, f1, f2, df, norms)
@@ -1155,7 +1190,7 @@ class PMMInSitu:
                                wu = 10, progress_dir = '.', fwin = [],\
                                duty_cycle = 0.5, show = True,\
                                restart_obj = False, verbose = False,\
-                               ID = ''):
+                               ID = '', snapback=False):
         """
         Performs an in-situ optimization procedure to produce a waveguide/beam
         steering device that operates at freqeuncy f and directs signal into
@@ -1252,9 +1287,18 @@ class PMMInSitu:
                 self.Save_Params(np.array(norms), progress_dir+\
                     '/norms_Wvg_%.1fGHz_fpm_%.1fGHz'%(f, fpm)+ID+'.csv')
             else:
-                pass
+                o = max(obj)
+
+        best_obj_so_far = o
+        best_rho_so_far = np.copy(rho)
 
         for e in range(epochs):
+            if snapback and (e > 0) and (e % 5 == 0):
+                print("="*80)
+                print(f"Epoch {e+1}: Snapping back to best rho (Objective: {best_obj_so_far:.5e}).")
+                print("="*80)
+                rho = np.copy(best_rho_so_far)
+            
             t1 = time.time()
             bulbs = bulb_idx
             bulbs_left = num_bulbs
@@ -1281,9 +1325,13 @@ class PMMInSitu:
                     print("-"*80)
 
                 # Compute objective
-                o, norms = self.Wvg_Obj_Get(rho, fpm, k, S, f,\
+                o, norms = self.Wvg_Obj_Get(rho_new, fpm, k, S, f,\
                                                 df, objective, norms, duty_cycle)
 
+                if o > best_obj_so_far:
+                    best_obj_so_far = o
+                    best_rho_so_far = np.copy(rho_new)
+                
                 if optimizer == 'grad. asc.':
                     # Compute gradient
                     grad = (o-obj[len(obj)-1])/(rho_new[iter_bulbs]-rho[iter_bulbs]+1e-10)
@@ -1453,7 +1501,7 @@ class PMMInSitu:
         self.Deactivate_Bulb('all')
         time.sleep(1)
         self.Deactivate_Bulb('all')
-        time.sleep(18/duty_cycle-24)
+        time.sleep(18/duty_cycle-20)
 
         if objective == 'comp':
             return Waveguide_Obj_Comp(freq/10**9, S21, S31, f, df, norms)
