@@ -606,7 +606,7 @@ class PMMInSitu:
             wp_max: Approximate maximum non-dimensionalized plasma frequency
         """
         
-        wp = (wp_max/1.5)*npa.arctan(rho/(wp_max/7.5))
+        wp = (wp_max/1.5)*np.arctan(rho/(wp_max/7.5))
         wp_dim = wp*c/self.a*2*np.pi
         ne = wp_dim**2*me*epso/e**2
 
@@ -795,7 +795,7 @@ class PMMInSitu:
         """
         BulbSet = self.Rho_to_Bulb_Fix(rho, wp_max, knob, scale, ballast)
         if ballast == 'New':
-            activate = 20
+            activate = 14
         else:
             activate = 12
 
@@ -1099,29 +1099,6 @@ class PMMInSitu:
             print("Epoch: %3d/%3d | Duration: %.2f secs | Value: %5e"\
                         %(e+1, epochs, t2-t1, o))
             print("="*80)
-
-            # --- MODIFICATION ---
-            # Plot intermediate results after every 5 epochs
-            if (e + 1) % 5 == 0 and e < epochs - 1:
-                print(f"--- Plotting intermediate results for Epoch {e + 1} ---")
-                
-                # Plot objective function progress
-                obj_savepath = progress_dir + f'/obj_Wvg_{f:.1f}GHz_fpm_{fpm:.1f}GHz{ID}_epoch_{e+1}.pdf'
-                self.Plot_Obj(obj_savepath, np.array(obj), show=show)
-                
-                # Take and plot a snapshot of the best S-parameter performance so far
-                print("Taking a snapshot measurement of the best state so far...")
-                try:
-                    self.ArraySet_Rho(best_rho_so_far, self.f_a(fpm), knob=k, scale=S)
-                    time.sleep(1)
-                    freq_snap, s21_snap, s31_snap = self.Get_S21_S31()
-                finally:
-                    self.Deactivate_Bulb('all') # Ensure bulbs are always turned off
-                
-                s_param_savepath = progress_dir + f'/Wvg_{f:.1f}GHz_fpm_{fpm:.1f}GHz_k{k:.1f}_S{S:.1f}_epoch_{e+1}.pdf'
-                self.Trans_Plot_2Port(s_param_savepath, freq_snap, s21_snap, s31_snap, fpm, k, S, f=[f], f_win=fwin, show=show)
-                print("--- Intermediate plots saved. Continuing optimization... ---")
-            # --- END MODIFICATION ---
             
             self.Save_Params(rho_evolution, progress_dir+\
                     '/rho_Demult_%.1f_%.1fGHz_fpm_%.1fGHz'%(f1,f2,fpm)+ID+'.csv')
@@ -1367,6 +1344,29 @@ class PMMInSitu:
             print("Epoch: %3d/%3d | Duration: %.2f secs | Value: %5e"\
                         %(e+1, epochs, t2-t1, o))
             print("="*80)
+            
+            # --- MODIFICATION ---
+            # Plot intermediate results after every 5 epochs
+            if (e + 1) % 5 == 0 and e < epochs - 1:
+                print(f"--- Plotting intermediate results for Epoch {e + 1} ---")
+                
+                # Plot objective function progress
+                obj_savepath = progress_dir + f'/obj_Wvg_{f:.1f}GHz_fpm_{fpm:.1f}GHz{ID}_epoch_{e+1}.pdf'
+                self.Plot_Obj(obj_savepath, np.array(obj), show=show)
+                
+                # Take and plot a snapshot of the best S-parameter performance so far
+                print("Taking a snapshot measurement of the best state so far...")
+                try:
+                    self.ArraySet_Rho(best_rho_so_far, self.f_a(fpm), knob=k, scale=S)
+                    time.sleep(1)
+                    freq_snap, s21_snap, s31_snap = self.Get_S21_S31()
+                finally:
+                    self.Deactivate_Bulb('all') # Ensure bulbs are always turned off
+                
+                s_param_savepath = progress_dir + f'/Wvg_{f:.1f}GHz_fpm_{fpm:.1f}GHz_k{k:.1f}_S{S:.1f}_epoch_{e+1}.pdf'
+                self.Trans_Plot_2Port(s_param_savepath, freq_snap//1e9, s21_snap, s31_snap, fpm, k, S, f=[f], f_win=fwin, show=show)
+                print("--- Intermediate plots saved. Continuing optimization... ---")
+            # --- END MODIFICATION ---
 
             self.Save_Params(rho_evolution, progress_dir+\
                     '/rho_Wvg_%.1fGHz_fpm_%.1fGHz'%(f, fpm)+ID+'.csv')
