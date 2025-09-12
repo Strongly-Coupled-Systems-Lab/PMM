@@ -612,8 +612,7 @@ class PMMInSitu:
 
         return ne
 
-
-    def Scale_Rho_fp(self, rho, wp_max):
+    def Scale_Rho_fp_old(self, rho, wp_max):
         """
         Uses an arctan barrier to map optimal parameters from the computational 
         inverse design library to plasma frequency values (dimensionalized, GHz)
@@ -622,11 +621,25 @@ class PMMInSitu:
             rho: Parameters being optimized
             wp_max: Approximate maximum non-dimensionalized plasma frequency
         """
-        
         fp = (wp_max/1.5)*np.arctan(np.abs(rho)/(wp_max/7.5))
         fp_dim = fp*c/self.a/10**9
 
         return fp_dim
+
+    def Scale_Rho_fp(self, rho, wp_max):
+        """
+        Uses an arctan barrier to map optimal parameters from the computational 
+        inverse design library to plasma frequency values (dimensionalized, GHz).
+        Fixed to ensure positive values of arctan barrier.
+
+        Args:
+            rho: Parameters being optimized
+            wp_max: Approximate maximum non-dimensionalized plasma frequency
+        """
+        rho_pos = np.clip(rho, 0.0, None) # Fix the arctan barrier by making it only positive
+        fp_nd = (wp_max / 1.5) * np.arctan(rho_pos / (wp_max / 7.5))
+        fp_dim_GHz = fp_nd * c / self.a / 1e9 # convert to GHz
+        return np.clip(fp_dim_GHz, 0.0, getattr(self, "fp_ceiling_GHz", 15.0)) # ceiling of 15
 
     
     def BulbSetting_BOLSIG(self, fp, knob = 0.5, scale = 1.0):
@@ -1364,7 +1377,7 @@ class PMMInSitu:
                     self.Deactivate_Bulb('all') # Ensure bulbs are always turned off
                 
                 s_param_savepath = progress_dir + f'/Wvg_{f:.1f}GHz_fpm_{fpm:.1f}GHz_k{k:.1f}_S{S:.1f}_epoch_{e+1}.pdf'
-                self.Trans_Plot_2Port(s_param_savepath, freq_snap//1e9, s21_snap, s31_snap, fpm, k, S, f=[f], f_win=fwin, show=show)
+                self.Trans_Plot_2Port(s_param_savepath, freq_snap/1e9, s21_snap, s31_snap, fpm, k, S, f=[f], f_win=fwin, show=show)
                 print("--- Intermediate plots saved. Continuing optimization... ---")
             # --- END MODIFICATION ---
 
@@ -1478,6 +1491,31 @@ class PMMInSitu:
                 if verbose:
                     print(f"Epoch {e+1}/{epochs} | Sample {s+1}/{per_epoch} | BO best {best_val:.5e}")
 
+                
+                # --- MODIFICATION: plot every 5 epochs ---
+                if (e + 1) % 5 == 0 and e < epochs - 1:
+                    print(f"--- Plotting intermediate results for Epoch {e + 1} ---")
+                    
+                    obj_savepath = progress_dir + f'/obj_Wvg_{f:.1f}GHz_fpm_{fpm:.1f}GHz{ID}_epoch_{e+1}.pdf'
+                    self.Plot_Obj(obj_savepath, np.array(obj), show=show)
+                    
+                    best_iter_so_far = np.argmax(np.array(obj))
+                    best_rho_for_plot = rho_evolution[best_iter_so_far, :]
+                    
+                    print("Taking a snapshot measurement of the best state so far...")
+                    try:
+                        self.ArraySet_Rho(best_rho_for_plot, self.f_a(fpm), knob=k, scale=S)
+                        time.sleep(1)
+                        freq_snap, s21_snap, s31_snap = self.Get_S21_S31()
+                    finally:
+                        self.Deactivate_Bulb('all')
+                    
+                    s_param_savepath = progress_dir + f'/Wvg_{f:.1f}GHz_fpm_{fpm:.1f}GHz_k{k:.1f}_S{S:.1f}_epoch_{e+1}.pdf'
+                    self.Trans_Plot_2Port(s_param_savepath, freq_snap / 1e9, s21_snap, s31_snap, fpm, k, S, f=[f], f_win=fwin, show=show)
+                    print("--- Intermediate plots saved. Continuing optimization... ---")
+                # --- END OF THE NEW BLOCK ---
+
+                
                 self.Save_Params(rho_evolution, rho_path)
                 self.Save_Params(np.array(obj), obj_path)
 
