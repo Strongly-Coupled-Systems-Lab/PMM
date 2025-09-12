@@ -1395,19 +1395,17 @@ class PMMInSitu:
         return
     
     
-    def optimize_waveguide_bayes(self,
-                             epochs, rho, fpm, k, S, f,
-                             df=0.5, sample=12, p_range=0.05,
-                             n_calls=15, n_init=5,
-                             objective='comp', wu=10, progress_dir='.',
-                             fwin=[], duty_cycle=0.5, show=True,
-                             restart_obj=False, verbose=False, ID=''):
+    
+    
+    def optimize_waveguide_bayes(self, epochs, rho, fpm, k, S, f,
+            df=0.5, sample=12, p_range=0.05,
+            n_calls=15, n_init=5,
+            objective='comp', wu=10, progress_dir='.',
+            fwin=[], duty_cycle=0.5, show=True,
+            restart_obj=False, verbose=False, ID=''):
         """
         Bayesian optimization version of waveguide/beam-steering in-situ tuning.
-        Prints like the stochastic version (header, per-sample, per-epoch).
-        Also plots the two graphs every 5 epochs.
         """
-        # deps
         try:
             from skopt import gp_minimize
             from skopt.space import Real
@@ -1427,9 +1425,10 @@ class PMMInSitu:
             obj   = self.Read_Params(obj_path).tolist()
             norms = self.Read_Params(nrm_path).tolist()
             rho_evolution = self.Read_Params(rho_path)
-            rho = np.copy(rho_evolution[np.argmax(obj), :])
+            rho = np.copy(rho_evolution[int(np.argmax(obj)), :])
             print('='*80)
-            print('NOTE: Optimizer starting over from sample %d of previous run' % (np.argmax(obj)+1))
+            print('NOTE: Optimizer starting over from sample %d of previous run'
+                % (int(np.argmax(obj))+1))
             print('='*80)
         else:
             rho_evolution = np.zeros((1, rho.shape[0]))
@@ -1465,7 +1464,8 @@ class PMMInSitu:
             obj.append(o)
             t2 = time.time()
             print("="*80)
-            print("Epoch: %3d/%3d | Duration: %.2f secs | Value: %5e" % (0, epochs, t2 - t1, o))
+            print("Epoch: %3d/%3d | Duration: %.2f secs | Value: %5e"
+                % (0, epochs, t2 - t1, o))
             print("="*80)
             self.Save_Params(np.array(norms), nrm_path)
 
@@ -1488,6 +1488,13 @@ class PMMInSitu:
                 d = block.shape[0]
                 base = np.copy(rho)
 
+                # --- verbose header (match stochastic: BEFORE only) ---
+                if verbose:
+                    print("-"*80)
+                    print("Bulbs sampled:", block + 1)
+                    print("fp before:", self.Scale_Rho_fp(base[block], self.f_a(fpm)))
+                    print("-"*80)
+
                 # closure: evaluate objective for a proposed delta on this block
                 def eval_delta(delta_vec):
                     nonlocal norms
@@ -1501,9 +1508,10 @@ class PMMInSitu:
                 # minimize the negative objective via BO
                 def skopt_obj(x): return -eval_delta(x)
                 space = [Real(-p_range, p_range, name=f"d{i}") for i in range(d)]
-                print("Epoch: %3d/%3d | Sample: %3d/%3d | Running %2d BO evals…" 
-                    % (e+1, epochs, s+1, per_epoch, n_calls), flush=True)
-                res = gp_minimize(skopt_obj, space, n_calls=n_calls, n_initial_points=n_init, noise="gaussian")
+                res = gp_minimize(skopt_obj, space,
+                                n_calls=n_calls,
+                                n_initial_points=n_init,
+                                noise="gaussian")
 
                 # apply best delta from BO
                 best_delta = np.array(res.x, float)
@@ -1527,15 +1535,12 @@ class PMMInSitu:
                 % (e+1, epochs, t_epoch_end - t_epoch_start, obj[-1]))
             print("="*80)
 
-            # every 5 epochs: 2 plots (same as stochastic)
+            # every 5 epochs: same plotting as stochastic
             if (e + 1) % 5 == 0 and e < epochs - 1:
                 print(f"--- Plotting intermediate results for Epoch {e + 1} ---")
-
-                # objective trace
                 obj_savepath = progress_dir + f'/obj_Wvg_{f:.1f}GHz_fpm_{fpm:.1f}GHz{ID}_epoch_{e+1}.pdf'
                 self.Plot_Obj(obj_savepath, np.array(obj), show=show)
 
-                # S-parameter snapshot using best-so-far
                 best_iter_so_far = int(np.argmax(np.array(obj)))
                 best_rho_for_plot = rho_evolution[best_iter_so_far, :]
                 print("Taking a snapshot measurement of the best state so far...")
@@ -1555,7 +1560,6 @@ class PMMInSitu:
         self.Wvg_Run_And_Plot(progress_dir, rho_evolution[best_i, :], fpm, k, S, f, fwin=fwin, show=show)
         self.Plot_Obj(f"{progress_dir}/obj_Wvg_{f:.1f}GHz_fpm_{fpm:.1f}GHz{ID}.pdf", np.array(obj))
         return
-
 
     
     
