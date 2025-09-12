@@ -1501,6 +1501,8 @@ class PMMInSitu:
                 # minimize the negative objective via BO
                 def skopt_obj(x): return -eval_delta(x)
                 space = [Real(-p_range, p_range, name=f"d{i}") for i in range(d)]
+                print("Epoch: %3d/%3d | Sample: %3d/%3d | Running %2d BO evals…" 
+                    % (e+1, epochs, s+1, per_epoch, n_calls), flush=True)
                 res = gp_minimize(skopt_obj, space, n_calls=n_calls, n_initial_points=n_init, noise="gaussian")
 
                 # apply best delta from BO
