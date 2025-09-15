@@ -24,6 +24,7 @@ import sys
 import time
 import yaml
 import threading
+import math
 
 ###############################################################################
 ## Utility functions and globals
@@ -605,7 +606,6 @@ class PMMInSitu:
             rho: Parameters being optimized
             wp_max: Approximate maximum non-dimensionalized plasma frequency
         """
-        
         wp = (wp_max/1.5)*np.arctan(rho/(wp_max/7.5))
         wp_dim = wp*c/self.a*2*np.pi
         ne = wp_dim**2*me*epso/e**2
@@ -639,7 +639,8 @@ class PMMInSitu:
         rho_pos = np.clip(rho, 0.0, None) # Fix the arctan barrier by making it only positive
         fp_nd = (wp_max / 1.5) * np.arctan(rho_pos / (wp_max / 7.5))
         fp_dim_GHz = fp_nd * c / self.a / 1e9 # convert to GHz
-        return np.clip(fp_dim_GHz, 0.0, getattr(self, "fp_ceiling_GHz", 20.0)) # ceiling of 15
+        
+        return np.clip(fp_dim_GHz, 0.0, getattr(self, "fp_ceiling_GHz", 20.0)) # ceiling of 20
 
     
     def BulbSetting_BOLSIG(self, fp, knob = 0.5, scale = 1.0):
@@ -1324,7 +1325,7 @@ class PMMInSitu:
                 
                 if optimizer == 'grad. asc.':
                     # Compute gradient
-                    grad = (o-obj[len(obj)-1])/(rho_new[iter_bulbs]-rho[iter_bulbs]+1e-10)
+                    grad = (o-obj[len(obj)-1])/(rho_new[iter_bulbs]-rho[iter_bulbs]+1e-10) #adding tiny number to make sure not 0
 
                     # Gradient Ascent
                     rho[iter_bulbs] = rho_evolution[rho_evolution.shape[0]-1,\
@@ -1358,28 +1359,24 @@ class PMMInSitu:
                         %(e+1, epochs, t2-t1, o))
             print("="*80)
             
-            # --- MODIFICATION ---
             # Plot intermediate results after every 5 epochs
             if (e + 1) % 5 == 0 and e < epochs - 1:
                 print(f"--- Plotting intermediate results for Epoch {e + 1} ---")
                 
-                # Plot objective function progress
                 obj_savepath = progress_dir + f'/obj_Wvg_{f:.1f}GHz_fpm_{fpm:.1f}GHz{ID}_epoch_{e+1}.pdf'
                 self.Plot_Obj(obj_savepath, np.array(obj), show=show)
                 
-                # Take and plot a snapshot of the best S-parameter performance so far
                 print("Taking a snapshot measurement of the best state so far...")
                 try:
                     self.ArraySet_Rho(best_rho_so_far, self.f_a(fpm), knob=k, scale=S)
                     time.sleep(1)
                     freq_snap, s21_snap, s31_snap = self.Get_S21_S31()
                 finally:
-                    self.Deactivate_Bulb('all') # Ensure bulbs are always turned off
+                    self.Deactivate_Bulb('all') 
                 
                 s_param_savepath = progress_dir + f'/Wvg_{f:.1f}GHz_fpm_{fpm:.1f}GHz_k{k:.1f}_S{S:.1f}_epoch_{e+1}.pdf'
                 self.Trans_Plot_2Port(s_param_savepath, freq_snap/1e9, s21_snap, s31_snap, fpm, k, S, f=[f], f_win=fwin, show=show)
                 print("--- Intermediate plots saved. Continuing optimization... ---")
-            # --- END MODIFICATION ---
 
             self.Save_Params(rho_evolution, progress_dir+\
                     '/rho_Wvg_%.1fGHz_fpm_%.1fGHz'%(f, fpm)+ID+'.csv')
@@ -1395,14 +1392,14 @@ class PMMInSitu:
         return
     
     
-    
-    
+
+
     def optimize_waveguide_bayes(self, epochs, rho, fpm, k, S, f,
-            df=0.5, sample=12, p_range=0.05,
-            n_calls=15, n_init=5,
-            objective='comp', wu=10, progress_dir='.',
-            fwin=[], duty_cycle=0.5, show=True,
-            restart_obj=False, verbose=False, ID=''):
+        df=0.5, sample=12, p_range=0.05,
+        n_calls=15, n_init=5,
+        objective='comp', wu=10, progress_dir='.',
+        fwin=[], duty_cycle=0.5, show=True,
+        restart_obj=False, verbose=False, ID=''):
         """
         Bayesian optimization version of waveguide/beam-steering in-situ tuning.
         """
@@ -1412,7 +1409,7 @@ class PMMInSitu:
         except Exception as e:
             raise ImportError("scikit-optimize required: pip install scikit-optimize") from e
 
-        import os, time
+        import os, time, math
         os.makedirs(progress_dir, exist_ok=True)
 
         # progress paths (match stochastic names)
@@ -1438,12 +1435,14 @@ class PMMInSitu:
 
         num_bulbs = rho.shape[0]
         bulbs_all = np.arange(num_bulbs)
-        per_epoch = num_bulbs // sample if num_bulbs % sample != 0 else num_bulbs // sample
+
+        # ETA-only; ensure it's never 0 and reflects ceil(#chunks)
+        per_epoch = max(1, math.ceil(num_bulbs / max(1, sample)))
 
         print("="*80)
         print("Initiating waveguide (Bayesian) optimization. You have chosen to run "
             f"{epochs} epochs with a\nsample factor of {sample}.")
-        print("Since there are "+str(num_bulbs)+" bulbs, this means that each epoch"
+        print("Since there are " + str(num_bulbs) + " bulbs, this means that each epoch"
             f" will take {per_epoch*38/60:.1f} minutes, for\na total runtime of"
             f" about {per_epoch*epochs + wu:.1f} minutes.")
         print("="*80)
@@ -1474,21 +1473,19 @@ class PMMInSitu:
             t_epoch_start = time.time()
 
             bulbs = bulbs_all.copy()
-            bulbs_left = num_bulbs
+            s_count = 0
 
-            for s in range(per_epoch):
-                # choose a block without replacement
-                if 2*sample < bulbs.shape[0]:
-                    idx = np.random.choice(bulbs_left, size=sample, replace=False)
-                    block = bulbs[idx]
-                    bulbs = np.delete(bulbs, idx)
-                    bulbs_left -= sample
-                else:
-                    block = bulbs
-                d = block.shape[0]
+            # --- Drain until empty: take chunks of size min(sample, remaining) ---
+            while bulbs.size > 0:
+                s_count += 1
+                take = min(sample, bulbs.size)
+                idx = np.random.choice(bulbs.size, size=take, replace=False)
+                block = bulbs[idx]
+                bulbs = np.delete(bulbs, idx)
+
+                d = block.size
                 base = np.copy(rho)
 
-                # --- verbose header (match stochastic: BEFORE only) ---
                 if verbose:
                     print("-"*80)
                     print("Bulbs sampled:", block + 1)
@@ -1501,17 +1498,26 @@ class PMMInSitu:
                     delta = np.clip(np.asarray(delta_vec, float), -p_range, p_range)
                     trial = np.copy(base)
                     trial[block] = base[block] + delta
-                    val, nrm = self.Wvg_Obj_Get(trial, fpm, k, S, f, df, objective, norms, duty_cycle)
+                    val, nrm = self.Wvg_Obj_Get(
+                        trial, fpm, k, S, f, df, objective, norms, duty_cycle
+                    )
                     norms = nrm
                     return float(val)
 
                 # minimize the negative objective via BO
                 def skopt_obj(x): return -eval_delta(x)
                 space = [Real(-p_range, p_range, name=f"d{i}") for i in range(d)]
-                res = gp_minimize(skopt_obj, space,
-                                n_calls=n_calls,
-                                n_initial_points=n_init,
-                                noise="gaussian")
+
+                # Safety: skopt requires n_calls >= n_init
+                n_calls_eff = max(int(n_calls), int(n_init))
+                n_init_eff  = min(int(n_init), n_calls_eff)
+
+                res = gp_minimize(
+                    skopt_obj, space,
+                    n_calls=n_calls_eff,
+                    n_initial_points=n_init_eff,
+                    noise="gaussian"
+                )
 
                 # apply best delta from BO
                 best_delta = np.array(res.x, float)
@@ -1522,21 +1528,21 @@ class PMMInSitu:
                 rho_evolution = np.row_stack([rho_evolution, rho])
                 obj.append(best_val)
                 print("Epoch: %3d/%3d | Sample: %3d/%3d | Value: %5e"
-                    % (e+1, epochs, s+1, per_epoch, best_val))
+                    % (e+1, epochs, s_count, per_epoch, best_val))
 
                 # save after each sample (match stochastic)
                 self.Save_Params(rho_evolution, rho_path)
                 self.Save_Params(np.array(obj), obj_path)
 
-            # end-of-epoch print (match stochastic)
+            # end-of-epoch print
             t_epoch_end = time.time()
             print("="*80)
             print("Epoch: %3d/%3d | Duration: %.2f secs | Value: %5e"
                 % (e+1, epochs, t_epoch_end - t_epoch_start, obj[-1]))
             print("="*80)
 
-            # every 5 epochs: same plotting as stochastic
-            if (e + 1) % 5 == 0 and e < epochs - 1:
+            # Plot every epoch except the final one 
+            if e < epochs - 1:
                 print(f"--- Plotting intermediate results for Epoch {e + 1} ---")
                 obj_savepath = progress_dir + f'/obj_Wvg_{f:.1f}GHz_fpm_{fpm:.1f}GHz{ID}_epoch_{e+1}.pdf'
                 self.Plot_Obj(obj_savepath, np.array(obj), show=show)
@@ -1551,14 +1557,22 @@ class PMMInSitu:
                 finally:
                     self.Deactivate_Bulb('all')
                 s_param_savepath = progress_dir + f'/Wvg_{f:.1f}GHz_fpm_{fpm:.1f}GHz_k{k:.1f}_S{S:.1f}_epoch_{e+1}.pdf'
-                self.Trans_Plot_2Port(s_param_savepath, freq_snap/1e9, s21_snap, s31_snap,
-                                    fpm, k, S, f=[f], f_win=fwin, show=show)
+                self.Trans_Plot_2Port(
+                    s_param_savepath, freq_snap/1e9, s21_snap, s31_snap,
+                    fpm, k, S, f=[f], f_win=fwin, show=show
+                )
                 print("--- Intermediate plots saved. Continuing optimization... ---")
 
-        # final result + plots (match stochastic)
+        # final result + plots
         best_i = int(np.argmax(np.array(obj)))
-        self.Wvg_Run_And_Plot(progress_dir, rho_evolution[best_i, :], fpm, k, S, f, fwin=fwin, show=show)
-        self.Plot_Obj(f"{progress_dir}/obj_Wvg_{f:.1f}GHz_fpm_{fpm:.1f}GHz{ID}.pdf", np.array(obj))
+        self.Wvg_Run_And_Plot(
+            progress_dir, rho_evolution[best_i, :],
+            fpm, k, S, f, fwin=fwin, show=show
+        )
+        self.Plot_Obj(
+            f"{progress_dir}/obj_Wvg_{f:.1f}GHz_fpm_{fpm:.1f}GHz{ID}.pdf",
+            np.array(obj)
+        )
         return
 
     
