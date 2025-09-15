@@ -339,33 +339,67 @@ class PMMInSitu:
 
 
 
-    def parallel_bulb_op(self, cmd_name, *cmd_args, tries=3, delay=0.6, verbose=None, **cmd_kwargs):
+    # def parallel_bulb_op(self, cmd_name, *cmd_args, tries=3, delay=0.6, verbose=None, **cmd_kwargs):
+    #     """
+    #     Runs a command on all bulbs, processing each serial port's list of bulbs in parallel
+    #     using the 'threading' module.
+    #     """
+    #     v = self.verbose if (verbose is None) else verbose
+    #     cmd = getattr(self, cmd_name)
+    #     port_to_addrs = self.config["serial_ports"]
+
+    #     def process_one_port(address_list):
+    #         for addr in address_list:
+    #             self._cmd_with_retry(cmd, addr, cmd_args, cmd_kwargs, tries, delay, verbose=v)
+
+    #     threads = []
+    #     if v:
+    #         print(f"Starting threads for {len(port_to_addrs)} ports...")
+    #     for addr_list in port_to_addrs.values():
+    #         thread = threading.Thread(target=process_one_port, args=(addr_list,))
+    #         threads.append(thread)
+    #         thread.start()
+    #     if v:
+    #         print("Waiting for all threads to complete...")
+    #     for thread in threads:
+    #         thread.join()
+    #     if v:
+    #         print(f"Finished '{cmd_name}' on all ports.")
+    #     return
+    def parallel_bulb_op(self, cmd_name, *cmd_args, tries=3, delay=0.6, **cmd_kwargs):
         """
-        Runs a command on all bulbs, processing each serial port's list of bulbs in parallel
-        using the 'threading' module.
+        Run a command across RS-485 buses in parallel.
+
         """
-        v = self.verbose if (verbose is None) else verbose
+        import threading, time
         cmd = getattr(self, cmd_name)
         port_to_addrs = self.config["serial_ports"]
 
-        def process_one_port(address_list):
+        def process_one_bus(port, address_list):
+            # Always broadcast for Activate/Deactivate
+            if cmd_name in ("Activate_Bulb", "Deactivate_Bulb"):
+                inst = self.bulbs['all'][port]  # broadcast instrument (slaveaddress=0)
+                value = 1 if cmd_name == "Activate_Bulb" else 0
+                for attempt in range(tries):
+                    try:
+                        inst.write_register(registeraddress=0x1006, value=value, functioncode=6)
+                        return
+                    except Exception:
+                        if attempt < tries - 1:
+                            time.sleep(delay)
+                return
+            # Otherwise, do per-bulb ops (serial per bus, parallel across buses)
             for addr in address_list:
-                self._cmd_with_retry(cmd, addr, cmd_args, cmd_kwargs, tries, delay, verbose=v)
+                self._cmd_with_retry(cmd, addr, cmd_args, cmd_kwargs, tries, delay)
 
         threads = []
-        if v:
-            print(f"Starting threads for {len(port_to_addrs)} ports...")
-        for addr_list in port_to_addrs.values():
-            thread = threading.Thread(target=process_one_port, args=(addr_list,))
-            threads.append(thread)
-            thread.start()
-        if v:
-            print("Waiting for all threads to complete...")
-        for thread in threads:
-            thread.join()
-        if v:
-            print(f"Finished '{cmd_name}' on all ports.")
-        return
+        for port, addr_list in port_to_addrs.items():
+            t = threading.Thread(target=process_one_bus, args=(port, addr_list))
+            t.start()
+            threads.append(t)
+        for t in threads:
+            t.join()
+
            
     
     # def Address(self, coords):
