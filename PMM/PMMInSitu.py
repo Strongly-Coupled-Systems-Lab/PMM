@@ -268,23 +268,9 @@ class PMMInSitu:
     #                 raise RuntimeError("Bulb "+str(bulb_addr)+" is not connected "+\
     #                                    "to the correct RS-485 bus.")
     
-    def _parallel_check_bulb(self, addr):
-        """Helper for parallel __init__ to check and deactivate a single bulb."""
-        try:
-            on = self.bulbs[addr]['Inst'].read_register(registeraddress=0x1004)
-            if on == 1:
-                print("The power supply associated with bulb "\
-                      +str(addr)+" is putting out power, fixing "+\
-                      "now. Check power supply.")
-                time.sleep(1.0)
-                self.bulbs[addr]['Inst'].write_register(\
-                        registeraddress=0x1006, value = 0, functioncode = 6)
-        except:
-            raise RuntimeError("Bulb "+str(addr)+" is not connected "+\
-                               "to the correct RS-485 bus.")
-            
-    
-    def __init__(self, conf_file, conf_dir = './../confs/'):
+    def __init__(self, conf_file, conf_dir = './../confs/', verbose=False):
+        self.verbose = verbose  
+
         with open(conf_file, 'r') as conf:
             self.config = yaml.load(conf, Loader=yaml.SafeLoader)
 
@@ -299,12 +285,13 @@ class PMMInSitu:
             if port not in ports:
                 raise RuntimeError("One or more of the ports in the config file\
                                     is not connected")
-                
-            print("checking port", port)
+            if self.verbose:
+                print("checking port", port)
+
             # Create 'all' pathway
             self.bulbs['all'][port] = minimalmodbus.Instrument(port = port,\
-                                      slaveaddress = 0,\
-                                      mode = minimalmodbus.MODE_RTU)
+                                    slaveaddress = 0,\
+                                    mode = minimalmodbus.MODE_RTU)
             self.bulbs['all'][port].serial.baudrate = 9600
             self.bulbs['all'][port].serial.bytesize = 8
             self.bulbs['all'][port].serial.parity = minimalmodbus.serial.PARITY_NONE
@@ -331,43 +318,55 @@ class PMMInSitu:
         self.parallel_bulb_op('_parallel_check_bulb')
 
 
-    def _cmd_with_retry(self, cmd, addr, cmd_args, cmd_kwargs, tries=3, delay=0.6):
+
+    def _cmd_with_retry(self, cmd, addr, cmd_args, cmd_kwargs, tries=3, delay=0.6, verbose=None):
         """Call a bulb command and retry on any exception."""
         import time
+        v = self.verbose if (verbose is None) else verbose
         for attempt in range(tries):
             try:
                 cmd(addr, *cmd_args, **cmd_kwargs)
                 return True
             except Exception as err:
                 if attempt == tries - 1:
-                    print(f"[FAIL] Addr {addr}: {cmd.__name__} → {err}")
+                    if v:
+                        print(f"[FAIL] Addr {addr}: {cmd.__name__} → {err}")
                 else:
-                    print(f"[WARN] Addr {addr}: {cmd.__name__} failed ({attempt+1}/{tries}); retrying…")
+                    if v:
+                        print(f"[WARN] Addr {addr}: {cmd.__name__} failed ({attempt+1}/{tries}); retrying…")
                     time.sleep(delay)
         return False
 
 
-    def parallel_bulb_op(self, cmd_name, *cmd_args, tries=3, delay=0.6, **cmd_kwargs):
+
+    def parallel_bulb_op(self, cmd_name, *cmd_args, tries=3, delay=0.6, verbose=None, **cmd_kwargs):
         """
         Runs a command on all bulbs, processing each serial port's list of bulbs in parallel
         using the 'threading' module.
         """
+        v = self.verbose if (verbose is None) else verbose
         cmd = getattr(self, cmd_name)
         port_to_addrs = self.config["serial_ports"]
 
         def process_one_port(address_list):
             for addr in address_list:
-                self._cmd_with_retry(cmd, addr, cmd_args, cmd_kwargs, tries, delay)
+                self._cmd_with_retry(cmd, addr, cmd_args, cmd_kwargs, tries, delay, verbose=v)
+
         threads = []
-        print(f"Starting threads for {len(port_to_addrs)} ports...")
+        if v:
+            print(f"Starting threads for {len(port_to_addrs)} ports...")
         for addr_list in port_to_addrs.values():
             thread = threading.Thread(target=process_one_port, args=(addr_list,))
             threads.append(thread)
             thread.start()
-        print("Waiting for all threads to complete...")
+        if v:
+            print("Waiting for all threads to complete...")
         for thread in threads:
-            thread.join() #wait until threads finished
-        print(f"Finished '{cmd_name}' on all ports.")            
+            thread.join()
+        if v:
+            print(f"Finished '{cmd_name}' on all ports.")
+        return
+           
     
     # def Address(self, coords):
     #     """
@@ -794,30 +793,21 @@ class PMMInSitu:
 
 
     
-    def ArraySet_Rho(self, rho, wp_max, knob = 0.5, scale = 1.0,\
-                     ballast = 'New'):
+    def ArraySet_Rho(self, rho, wp_max, knob = 0.5, scale = 1.0, ballast = 'New', verbose=None):
         """
         Accepts optimal parameter array (MUST BE FLATTENED) and activates the
         bulb array accordingly.
-
-        Args:
-            rho: optimal parameter array (flattened) from PMMInverse library
-            wp_max: Approximate maximum non-dimensionalized plasma frequency
-            knob: constant to tune experimental fit to lower and upper range of
-                  BOLSIG cases. knob = 0 is low end and knob = 1 is high end.
-            scale: Parameter that scales the overall plasma frequency values.
         """
-        BulbSet = self.Rho_to_Bulb_Fix(rho, wp_max, knob, scale, ballast)
-        if ballast == 'New':
-            activate = 14
-        else:
-            activate = 12
+        v = self.verbose if (verbose is None) else verbose
 
-        self.Set_Bulb_VI('all', activate, 10, verbose = False)
+        BulbSet = self.Rho_to_Bulb_Fix(rho, wp_max, knob, scale, ballast)
+        activate = 14 if ballast == 'New' else 12
+
+        self.Set_Bulb_VI('all', activate, 10, verbose=False)
         time.sleep(0.005)
-        self.Activate_Bulb('all') # This is already parallel
+        self.Activate_Bulb('all')  
         time.sleep(1)
-        self.Set_Bulb_VI('all', activate-4, 10, verbose = False)
+        self.Set_Bulb_VI('all', activate-4, 10, verbose=False)
 
         port_to_addrs = self.config["serial_ports"]
         
@@ -836,18 +826,20 @@ class PMMInSitu:
                         not_set = False
                     except:
                         tries += 1
-                        print('Trouble setting bulb '+str(addr)+', trying again')
+                        if v:
+                            print('Trouble setting bulb '+str(addr)+', trying again')
                         time.sleep(1)
                 if not_set:
                     try:
                         self.Set_Bulb_VI(addr, V, I, verbose=False)
                         time.sleep(0.005)
                     except:
+                        # safety shutdown unchanged
                         self.Deactivate_Bulb('all')
                         time.sleep(3)
                         self.Deactivate_Bulb('all')
                         raise RuntimeError("Failed to set bulb "+str(addr)+\
-                                           " six times. Check config.")
+                                        " six times. Check config.")
 
         threads = []
         for addr_list in port_to_addrs.values():
@@ -859,6 +851,7 @@ class PMMInSitu:
             thread.join()
 
         return
+
     
 
 
