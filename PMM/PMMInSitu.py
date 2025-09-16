@@ -693,12 +693,13 @@ class PMMInSitu:
             wp_max: Approximate maximum non-dimensionalized plasma frequency
         """
         rho_pos = np.clip(rho, 0.0, None) # Fix the arctan barrier by making it only positive
-        fp_nd = (wp_max / 1.5) * np.arctan(rho_pos / (wp_max / 7.5))
+        fp_nd = (wp_max / 1.2) * np.arctan(rho_pos / (wp_max / 10))
         fp_dim_GHz = fp_nd * c / self.a / 1e9 # convert to GHz
         
         return np.clip(fp_dim_GHz, 0.0, getattr(self, "fp_ceiling_GHz", 20.0)) # ceiling of 20
 
-    
+
+
     def BulbSetting_BOLSIG(self, fp, knob = 0.5, scale = 1.0):
         """
         Maps plasma frequency value in GHz to a current and voltage setting for
