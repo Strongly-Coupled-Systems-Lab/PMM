@@ -268,6 +268,29 @@ class PMMInSitu:
     #                 raise RuntimeError("Bulb "+str(bulb_addr)+" is not connected "+\
     #                                    "to the correct RS-485 bus.")
     
+    def _parallel_check_bulb(self, addr, verbose=False):
+        """
+        Helper used by __init__ to ping each bulb in parallel:
+        - reads the ON/OFF register
+        - if a supply is on, turn it off
+        - raises a clear error if the bulb isn't reachable
+        """
+        import time
+        try:
+            inst = self.bulbs[addr]['Inst']
+            on = inst.read_register(registeraddress=0x1004)  # 1 = ON, 0 = OFF
+            if on == 1:
+                if verbose:
+                    print(f"Bulb {addr} was ON at init; turning OFF.")
+                time.sleep(1.0)
+                inst.write_register(registeraddress=0x1006, value=0, functioncode=6)  # OFF
+        except Exception as e:
+            raise RuntimeError(
+                f"Bulb {addr} is not connected to the correct RS-485 bus (init check failed): {e}"
+            )
+
+    
+    
     def __init__(self, conf_file, conf_dir = './../confs/', verbose=False):
         self.verbose = verbose  
 
@@ -705,7 +728,7 @@ class PMMInSitu:
             return (min(max(V, 0.0), 20.0), 10) # Clamp voltage between 0V and 20V.
         
 
-    def BulbSetting_BOLSIG_NewDC(self, fp, knob = 0.5, scale = 1.0):
+    def BulbSetting_BOLSIG_NewDC(self, fp, knob = 0.3, scale = 1.2):
         """
         Maps plasma frequency (fp) in GHz to DC power supply voltage and current
         settings using a min/max envelope structure based on new experimental fits.
@@ -763,10 +786,21 @@ class PMMInSitu:
             else:
                 return (V_MIN_VOLT, I_MAX_AMP)
 
-        # Zone 5: Voltage-Controlled
+        # # Zone 5: Voltage-Controlled
+        # elif fp_scaled <= Max_volt_fp:
+        #     V = 5**((fp_scaled + 4.5) / A_coeff) + 4.8
+        #     return (min(max(V, V_MIN_VOLT), V_MAX_VOLT), I_MAX_AMP)
+        
+        # Zone 5: Voltage-Controlled (linearized to avoid bunching near ~15 V)
         elif fp_scaled <= Max_volt_fp:
-            V = 5**((fp_scaled + 4.5) / A_coeff) + 4.8
-            return (min(max(V, V_MIN_VOLT), V_MAX_VOLT), I_MAX_AMP)
+            # Normalize fp within the voltage zone
+            denom = max(Max_volt_fp - Min_volt_fp, 1e-6)
+            t = np.clip((fp_scaled - Min_volt_fp) / denom, 0.0, 1.0)
+            # Linearly spread V across the allowed range
+            V = V_MIN_VOLT + t * (V_MAX_VOLT - V_MIN_VOLT)
+            return (V, I_MAX_AMP)
+
+
 
         # Zone 6: Max Power
         else: # fp_scaled > Max_volt_fp
@@ -1422,7 +1456,7 @@ class PMMInSitu:
 
 
     def optimize_waveguide_bayes(self, epochs, rho, fpm, k, S, f,
-        df=0.5, sample=12, p_range=0.05,
+        df=0.5, sample=12, p_range=0.10,
         n_calls=15, n_init=5,
         objective='comp', wu=10, progress_dir='.',
         fwin=[], duty_cycle=0.5, show=True,
@@ -1520,7 +1554,7 @@ class PMMInSitu:
                     print("-"*80)
 
                 # closure: evaluate objective for a proposed delta on this block
-                def eval_delta(delta_vec):
+                def eval_delta(delta_vec): # like objective function
                     nonlocal norms
                     delta = np.clip(np.asarray(delta_vec, float), -p_range, p_range)
                     trial = np.copy(base)
@@ -1539,7 +1573,7 @@ class PMMInSitu:
                 n_calls_eff = max(int(n_calls), int(n_init))
                 n_init_eff  = min(int(n_init), n_calls_eff)
 
-                res = gp_minimize(
+                res = gp_minimize( # bayesian optimizer
                     skopt_obj, space,
                     n_calls=n_calls_eff,
                     n_initial_points=n_init_eff,
