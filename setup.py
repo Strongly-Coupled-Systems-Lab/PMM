@@ -19,5 +19,6 @@ setup(name="PMM",
           'pyserial',
           'serial',
           'RSInstrument',
+          'scikit-optimize',
           ]
       )

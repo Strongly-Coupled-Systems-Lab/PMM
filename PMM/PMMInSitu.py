@@ -25,6 +25,8 @@ import time
 import yaml
 import threading
 import math
+from skopt import gp_minimize #bayes
+from skopt.space import Real
 
 ###############################################################################
 ## Utility functions and globals
