@@ -694,11 +694,12 @@ class PMMInSitu:
             rho: Parameters being optimized
             wp_max: Approximate maximum non-dimensionalized plasma frequency
         """
-        rho_pos = np.clip(rho, 0.0, None) # Fix the arctan barrier by making it only positive
-        fp_nd = (wp_max / 1.2) * np.arctan(rho_pos / (wp_max / 10))
+        fp_nd = np.clip(rho, 0.0, None) # making it only positive
+        #fp_nd = (wp_max / 1.2) * np.arctan(rho_pos / (wp_max / 10))
         fp_dim_GHz = fp_nd * c / self.a / 1e9 # convert to GHz
+        ceiling = getattr(self, "fp_ceiling_GHz", 20.0)  # hardware safety limit
         
-        return np.clip(fp_dim_GHz, 0.0, getattr(self, "fp_ceiling_GHz", 20.0)) # ceiling of 20
+        return np.clip(fp_dim_GHz, 0.0, ceiling)
 
 
 
@@ -1467,13 +1468,6 @@ class PMMInSitu:
         """
         Bayesian optimization version of waveguide/beam-steering in-situ tuning.
         """
-        try:
-            from skopt import gp_minimize
-            from skopt.space import Real
-        except Exception as e:
-            raise ImportError("scikit-optimize required: pip install scikit-optimize") from e
-
-        import os, time, math
         os.makedirs(progress_dir, exist_ok=True)
 
         # progress paths (match stochastic names)
@@ -1500,8 +1494,7 @@ class PMMInSitu:
         num_bulbs = rho.shape[0]
         bulbs_all = np.arange(num_bulbs)
 
-        # ETA-only; ensure it's never 0 and reflects ceil(#chunks)
-        per_epoch = max(1, math.ceil(num_bulbs / max(1, sample)))
+        per_epoch = max(1, math.ceil(num_bulbs / max(1, sample))) #delete if i delete samples...?
 
         print("="*80)
         print("Initiating waveguide (Bayesian) optimization. You have chosen to run "
@@ -1627,7 +1620,6 @@ class PMMInSitu:
                 )
                 print("--- Intermediate plots saved. Continuing optimization... ---")
 
-        # final result + plots
         best_i = int(np.argmax(np.array(obj)))
         self.Wvg_Run_And_Plot(
             progress_dir, rho_evolution[best_i, :],
