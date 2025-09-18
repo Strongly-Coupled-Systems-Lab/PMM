@@ -811,7 +811,68 @@ class PMMInSitu:
             return (V_MAX_VOLT, I_MAX_AMP)
 
 
-    
+    def BulbSetting_BOLSIG_NewDC(self, fp, knob=0.3, scale=1.2):
+        """
+        20 V–max refit: maps plasma frequency (fp, GHz) -> (V, I) with
+        a properly spanned voltage-controlled region (6–20 V).
+        Smooth transition between current- and voltage-controlled zones,
+        no hard pinning at 20 V.
+        """
+        k = knob
+        S = scale
+        fp_scaled = fp / max(S, 1e-9)
+
+        B_offset = 1.7 * k
+        A_coeff = 10.0 + 3.8 * k
+
+        I_MIN, I_MAX = 0.1, 10.0
+        V_MIN, V_MAX = 6.0, 20.0
+        V_CC = 16.0   # current-control voltage
+        V_IGN = 18.0  # ignition voltage 
+
+        # Helper: map V to fp for boundaries
+        def fp_from_V(V):
+            return A_coeff * (np.log(max(V - 4.8, 5e-6)) / np.log(5.0)) - 4.5
+
+        # Boundaries in fp space
+        Min_curr_fp = (3.0 / 13.0) * I_MIN + B_offset
+        Max_curr_fp = (3.0 / 13.0) * I_MAX + B_offset
+        Min_volt_fp = fp_from_V(V_MIN)
+        Max_volt_fp = fp_from_V(V_MAX)
+
+        # Zones:
+        # 1) Off
+        if fp_scaled < 0.6 * Min_curr_fp:
+            return (0.0, 0.0)
+
+        # 2) Ignition
+        if fp_scaled < Min_curr_fp:
+            return (V_IGN, 1.0)
+
+        # 3) Current-controlled zone
+        if fp_scaled < Max_curr_fp:
+            I = (fp_scaled - B_offset) * (13.0 / 3.0)
+            I = np.clip(I, I_MIN, I_MAX)
+            return (V_CC, I)
+
+        # 4) Transition zone: blend from (V_CC, I_MAX) to (V_MIN, I_MAX)
+        if fp_scaled < Min_volt_fp:
+            denom = max(Min_volt_fp - Max_curr_fp, 1e-6)
+            x = (fp_scaled - Max_curr_fp) / denom
+            w = np.clip(x, 0.0, 1.0)
+            w = w * w * (3.0 - 2.0 * w) # smoothstep for gradual rather than sharp
+            V = (1.0 - w) * V_CC + w * V_MIN
+            return (V, I_MAX)
+
+        # 5) Voltage-controlled zone: I fixed, V varies smoothly 6–20 V
+        if fp_scaled <= Max_volt_fp:
+            V = np.power(5.0, (fp_scaled + 4.5) / max(A_coeff, 1e-6)) + 4.8
+            V = float(np.clip(V, V_MIN, V_MAX))
+            return (V, I_MAX)
+
+        # 6) Max cap
+        return (V_MAX, I_MAX)
+
 
 
     def Rho_to_Bulb(self, rho, wp_max, knob = 0.5, scale = 1.0,\
@@ -1549,8 +1610,8 @@ class PMMInSitu:
                     print("fp before:", self.Scale_Rho_fp(base[block], self.f_a(fpm)))
                     print("-"*80)
 
-                # closure: evaluate objective for a proposed delta on this block
-                def eval_delta(delta_vec): # like objective function
+                # evaluate objective for a delta
+                def eval_delta(delta_vec): 
                     nonlocal norms
                     delta = np.clip(np.asarray(delta_vec, float), -p_range, p_range)
                     trial = np.copy(base)
@@ -1562,14 +1623,14 @@ class PMMInSitu:
                     return float(val)
 
                 # minimize the negative objective via BO
-                def skopt_obj(x): return -eval_delta(x)
-                space = [Real(-p_range, p_range, name=f"d{i}") for i in range(d)]
+                def skopt_obj(x): return -eval_delta(x) # objective
+                space = [Real(-p_range, p_range, name=f"d{i}") for i in range(d)] #defining search space
 
                 # Safety: skopt requires n_calls >= n_init
                 n_calls_eff = max(int(n_calls), int(n_init))
                 n_init_eff  = min(int(n_init), n_calls_eff)
 
-                res = gp_minimize( # bayesian optimizer
+                res = gp_minimize( # bayesian optimizer (gaussian process surrogate)
                     skopt_obj, space,
                     n_calls=n_calls_eff,
                     n_initial_points=n_init_eff,
@@ -1581,13 +1642,13 @@ class PMMInSitu:
                 rho[block] = base[block] + best_delta
                 best_val = -res.fun  # maximize original objective
 
-                # per-sample print (match stochastic)
+                # per-sample print 
                 rho_evolution = np.row_stack([rho_evolution, rho])
                 obj.append(best_val)
                 print("Epoch: %3d/%3d | Sample: %3d/%3d | Value: %5e"
                     % (e+1, epochs, s_count, per_epoch, best_val))
 
-                # save after each sample (match stochastic)
+                # save after each sample 
                 self.Save_Params(rho_evolution, rho_path)
                 self.Save_Params(np.array(obj), obj_path)
 
