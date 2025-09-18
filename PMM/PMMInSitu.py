@@ -686,10 +686,9 @@ class PMMInSitu:
 
     def Scale_Rho_fp(self, rho, wp_max):
         """
-        Uses an arctan barrier to map optimal parameters from the computational 
+        Maps optimal parameters from the computational 
         inverse design library to plasma frequency values (dimensionalized, GHz).
-        Fixed to ensure positive values of arctan barrier.
-
+        
         Args:
             rho: Parameters being optimized
             wp_max: Approximate maximum non-dimensionalized plasma frequency
@@ -698,6 +697,33 @@ class PMMInSitu:
         #fp_nd = (wp_max / 1.2) * np.arctan(rho_pos / (wp_max / 10))
         fp_dim_GHz = fp_nd * c / self.a / 1e9 # convert to GHz
         ceiling = getattr(self, "fp_ceiling_GHz", 20.0)  # hardware safety limit
+        
+        # ----- verbose prints -----
+        if self.verbose:
+            if hasattr(fp_dim_GHz, "size"):
+                n = int(fp_dim_GHz.size)
+                rho_min = float(np.min(rho))
+                rho_med = float(np.median(rho))
+                rho_max = float(np.max(rho))
+                fp_min  = float(np.min(fp_dim_GHz))
+                fp_med  = float(np.median(fp_dim_GHz))
+                fp_max  = float(np.max(fp_dim_GHz))
+                clipped_hi = int(np.sum(fp_dim_GHz > ceiling))
+                clipped_lo = int(np.sum(rho < 0))
+            else:
+                n = 1
+                rho_min = rho_med = rho_max = float(rho)
+                fp_min  = fp_med  = fp_max  = float(fp_dim_GHz)
+                clipped_hi = int(fp_dim_GHz > ceiling)
+                clipped_lo = int(rho < 0)
+            print(
+                "[Scale_Rho_fp]",
+                f"size={n}",
+                f"rho[min,med,max]=({rho_min:.4g},{rho_med:.4g},{rho_max:.4g})",
+                f"fp_GHz[min,med,max]=({fp_min:.4g},{fp_med:.4g},{fp_max:.4g})",
+                f"clipped_hi={clipped_hi} clipped_lo={clipped_lo} ceil={ceiling} GHz"
+            )
+        
         
         return np.clip(fp_dim_GHz, 0.0, ceiling)
 
@@ -732,91 +758,11 @@ class PMMInSitu:
             return (min(max(V, 0.0), 20.0), 10) # Clamp voltage between 0V and 20V.
         
 
-    def BulbSetting_BOLSIG_NewDC(self, fp, knob = 0.3, scale = 1.2):
-        """
-        Maps plasma frequency (fp) in GHz to DC power supply voltage and current
-        settings using a min/max envelope structure based on new experimental fits.
-
-        Args:
-            fp (float): Target plasma frequency in GHz.
-            knob (float): Tunes the fit between the lower (0.0) and upper (1.0) bounds.
-            scale (float): Scales the overall plasma frequency values.
-        """
-        k = knob
-        S = scale
-        fp_scaled = fp / S
-
-        # Current Fit: fp = (3/13) * I + B_offset
-        B_offset = 1.7 * k
-
-        # Voltage Fit: fp = A_coeff * log(V - 4.8)/log(5) - 4.5
-        A_coeff = 10.0 + 3.8 * k
-
-        I_MIN_AMP = 0.1   # Minimum reliable operating current
-        I_MAX_AMP = 10.0  # Maximum supply current
-        V_MIN_VOLT = 6.0  # Minimum reliable operating voltage
-        V_MAX_VOLT = 20.0 # Maximum supply voltage
-
-        # Calculate the fp values that correspond to these physical boundaries
-        Min_curr_fp = (3/13) * I_MIN_AMP + B_offset
-        Max_curr_fp = (3/13) * I_MAX_AMP + B_offset
-        
-        # The log(V - 4.8) term requires V > 4.8
-        if V_MIN_VOLT <= 4.8:
-            Min_volt_fp = float('inf') # Set boundary high to effectively skip voltage control
-        else:
-            Min_volt_fp = A_coeff * np.log(V_MIN_VOLT - 4.8) / np.log(5) - 4.5
-        Max_volt_fp = A_coeff * np.log(V_MAX_VOLT - 4.8) / np.log(5) - 4.5
-        
-        # Zone 1: Off
-        if fp_scaled < Min_curr_fp / 2:
-            return (0, 0)
-        
-        # Zone 2: Ignition
-        elif fp_scaled < Min_curr_fp:
-            I = (Min_curr_fp - B_offset) * (13/3)
-            return (20, I)
-
-        # Zone 3: Current-Controlled
-        elif fp_scaled < Max_curr_fp:
-            I = (fp_scaled - B_offset) * (13/3)
-            return (20, I)
-
-        # Zone 4: Transition
-        elif fp_scaled < Min_volt_fp:
-            midpoint = Max_curr_fp + (Min_volt_fp - Max_curr_fp) / 2
-            if fp_scaled < midpoint:
-                return (20, I_MAX_AMP)
-            else:
-                return (V_MIN_VOLT, I_MAX_AMP)
-
-        # # Zone 5: Voltage-Controlled
-        # elif fp_scaled <= Max_volt_fp:
-        #     V = 5**((fp_scaled + 4.5) / A_coeff) + 4.8
-        #     return (min(max(V, V_MIN_VOLT), V_MAX_VOLT), I_MAX_AMP)
-        
-        # Zone 5: Voltage-Controlled (linearized to avoid bunching near ~15 V)
-        elif fp_scaled <= Max_volt_fp:
-            # Normalize fp within the voltage zone
-            denom = max(Max_volt_fp - Min_volt_fp, 1e-6)
-            t = np.clip((fp_scaled - Min_volt_fp) / denom, 0.0, 1.0)
-            # Linearly spread V across the allowed range
-            V = V_MIN_VOLT + t * (V_MAX_VOLT - V_MIN_VOLT)
-            return (V, I_MAX_AMP)
-
-
-
-        # Zone 6: Max Power
-        else: # fp_scaled > Max_volt_fp
-            return (V_MAX_VOLT, I_MAX_AMP)
-
 
     def BulbSetting_BOLSIG_NewDC(self, fp, knob=0.3, scale=1.2):
         """
-        20 V–max refit: maps plasma frequency (fp, GHz) -> (V, I) with
-        a properly spanned voltage-controlled region (6–20 V).
-        Smooth transition between current- and voltage-controlled zones,
-        no hard pinning at 20 V.
+        Maps plasma frequency value in GHz to a current and voltage setting for
+        the DC power supplies.
         """
         k = knob
         S = scale
@@ -840,19 +786,28 @@ class PMMInSitu:
         Min_volt_fp = fp_from_V(V_MIN)
         Max_volt_fp = fp_from_V(V_MAX)
 
+        
         # Zones:
         # 1) Off
         if fp_scaled < 0.6 * Min_curr_fp:
+            if self.verbose:
+                print(f"[BulbSetting_BOLSIG_NewDC] zone=OFF fp={fp:.4g} scaled={fp_scaled:.4g} -> V=0 I=0")
             return (0.0, 0.0)
 
         # 2) Ignition
         if fp_scaled < Min_curr_fp:
+            if self.verbose:
+                print(f"[BulbSetting_BOLSIG_NewDC] zone=IGNITION fp={fp:.4g} scaled={fp_scaled:.4g} -> V={V:.3f} I={I:.3f}")
             return (V_IGN, 1.0)
 
         # 3) Current-controlled zone
         if fp_scaled < Max_curr_fp:
             I = (fp_scaled - B_offset) * (13.0 / 3.0)
             I = np.clip(I, I_MIN, I_MAX)
+            V = V_CC
+            if self.verbose:
+                print(f"[BulbSetting_BOLSIG_NewDC] zone=CURRENT fp={fp:.4g} scaled={fp_scaled:.4g} "
+                    f"I_raw={I_raw:.3f} -> V={V:.3f} I={I:.3f}")
             return (V_CC, I)
 
         # 4) Transition zone: blend from (V_CC, I_MAX) to (V_MIN, I_MAX)
@@ -862,15 +817,23 @@ class PMMInSitu:
             w = np.clip(x, 0.0, 1.0)
             w = w * w * (3.0 - 2.0 * w) # smoothstep for gradual rather than sharp
             V = (1.0 - w) * V_CC + w * V_MIN
+            if self.verbose:
+                print(f"[BulbSetting_BOLSIG_NewDC] zone=TRANSITION fp={fp:.4g} scaled={fp_scaled:.4g} "
+                    f"x={x:.3f} w={w:.3f} -> V={V:.3f} I={I:.3f}")
             return (V, I_MAX)
 
         # 5) Voltage-controlled zone: I fixed, V varies smoothly 6–20 V
         if fp_scaled <= Max_volt_fp:
             V = np.power(5.0, (fp_scaled + 4.5) / max(A_coeff, 1e-6)) + 4.8
             V = float(np.clip(V, V_MIN, V_MAX))
+            if self.verbose:
+                print(f"[BulbSetting_BOLSIG_NewDC] zone=VOLTAGE fp={fp:.4g} scaled={fp_scaled:.4g} "
+                    f"V_raw={V_raw:.3f} -> V={V:.3f} I={I:.3f}")
             return (V, I_MAX)
 
         # 6) Max cap
+        if self.verbose:
+            print(f"[BulbSetting_BOLSIG_NewDC] zone=MAX_CAP fp={fp:.4g} scaled={fp_scaled:.4g} -> V={V:.3f} I={I:.3f}")
         return (V_MAX, I_MAX)
 
 
