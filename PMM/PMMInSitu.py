@@ -791,13 +791,13 @@ class PMMInSitu:
         # 1) Off
         if fp_scaled < 0.6 * Min_curr_fp:
             if self.verbose:
-                print(f"[BulbSetting_BOLSIG_NewDC] zone=OFF fp={fp:.4g} scaled={fp_scaled:.4g} -> V=0 I=0")
+                print(f"[BulbSetting_BOLSIG_NewDC] zone=OFF fp={fp:.4g} scaled={fp_scaled:.4g} -> V=0.000 I=0.000")
             return (0.0, 0.0)
 
         # 2) Ignition
         if fp_scaled < Min_curr_fp:
             if self.verbose:
-                print(f"[BulbSetting_BOLSIG_NewDC] zone=IGNITION fp={fp:.4g} scaled={fp_scaled:.4g} -> V={V:.3f} I={I:.3f}")
+                print(f"[BulbSetting_BOLSIG_NewDC] zone=IGNITION fp={fp:.4g} scaled={fp_scaled:.4g} -> V={V_IGN:.3f} I={1.0:.3f}")
             return (V_IGN, 1.0)
 
         # 3) Current-controlled zone
@@ -806,8 +806,7 @@ class PMMInSitu:
             I = np.clip(I, I_MIN, I_MAX)
             V = V_CC
             if self.verbose:
-                print(f"[BulbSetting_BOLSIG_NewDC] zone=CURRENT fp={fp:.4g} scaled={fp_scaled:.4g} "
-                    f"I_raw={I_raw:.3f} -> V={V:.3f} I={I:.3f}")
+                print(f"[BulbSetting_BOLSIG_NewDC] zone=CURRENT fp={fp:.4g} scaled={fp_scaled:.4g} -> V={V:.3f} I={I:.3f}")
             return (V_CC, I)
 
         # 4) Transition zone: blend from (V_CC, I_MAX) to (V_MIN, I_MAX)
@@ -818,8 +817,7 @@ class PMMInSitu:
             w = w * w * (3.0 - 2.0 * w) # smoothstep for gradual rather than sharp
             V = (1.0 - w) * V_CC + w * V_MIN
             if self.verbose:
-                print(f"[BulbSetting_BOLSIG_NewDC] zone=TRANSITION fp={fp:.4g} scaled={fp_scaled:.4g} "
-                    f"x={x:.3f} w={w:.3f} -> V={V:.3f} I={I:.3f}")
+                print(f"[BulbSetting_BOLSIG_NewDC] zone=TRANSITION fp={fp:.4g} scaled={fp_scaled:.4g} -> V={float(V):.3f} I={I_MAX:.3f}")
             return (V, I_MAX)
 
         # 5) Voltage-controlled zone: I fixed, V varies smoothly 6–20 V
@@ -827,14 +825,25 @@ class PMMInSitu:
             V = np.power(5.0, (fp_scaled + 4.5) / max(A_coeff, 1e-6)) + 4.8
             V = float(np.clip(V, V_MIN, V_MAX))
             if self.verbose:
-                print(f"[BulbSetting_BOLSIG_NewDC] zone=VOLTAGE fp={fp:.4g} scaled={fp_scaled:.4g} "
-                    f"V_raw={V_raw:.3f} -> V={V:.3f} I={I:.3f}")
+                print(f"[BulbSetting_BOLSIG_NewDC] zone=VOLTAGE fp={fp:.4g} scaled={fp_scaled:.4g} -> V={V:.3f} I={I_MAX:.3f}")
             return (V, I_MAX)
 
         # 6) Max cap
         if self.verbose:
-            print(f"[BulbSetting_BOLSIG_NewDC] zone=MAX_CAP fp={fp:.4g} scaled={fp_scaled:.4g} -> V={V:.3f} I={I:.3f}")
+            print(f"[BulbSetting_BOLSIG_NewDC] zone=MAX_CAP fp={fp:.4g} scaled={fp_scaled:.4g} -> V={V_MAX:.3f} I={I_MAX:.3f}")
         return (V_MAX, I_MAX)
+    
+    def BulbSetting_VOLTAGE_ONLY(self, x, V_min=6.0, V_max=20.0, I_fixed=10.0, tau=4.0):
+        """
+        Direct voltage control:
+        - x is the optimizer's parameter (use rho[i])
+        - V = affine(tanh(x/tau)) in [V_min, V_max]
+        - I is fixed at I_fixed (10 A)
+        """
+        s = 0.5*(1.0 + np.tanh(x/float(tau))) #maybe not tanh?
+        V = V_min + (V_max - V_min)*s
+        return (float(V), float(I_fixed))
+
 
 
 
@@ -863,7 +872,7 @@ class PMMInSitu:
         return BulbSet
 
 
-    def Rho_to_Bulb_Fix(self, rho, wp_max, knob = 0.5, scale = 1.0,\
+    def Rho_to_Bulb_Fixold(self, rho, wp_max, knob = 0.5, scale = 1.0,\
                     ballast = 'New'):
         """
         Accepts optimal parameter array (MUST BE FLATTENED) and returns (V,I)
@@ -886,6 +895,15 @@ class PMMInSitu:
                 BulbSet[i,:] = self.BulbSetting_BOLSIG(fp[i], knob, scale)
 
         return BulbSet
+    
+    def Rho_to_Bulb_Fix(self, rho, wp_max, knob=0.5, scale=1.0, ballast='New'):
+        BulbSet = np.zeros((rho.shape[0], 2))
+        for i in range(rho.shape[0]):
+            # ignore fp; drive voltage directly from rho
+            V, I = self.BulbSetting_VOLTAGE_ONLY(rho[i], V_min=6.0, V_max=20.0, I_fixed=10.0, tau=4.0)
+            BulbSet[i,:] = (V, I)
+        return BulbSet
+
 
 
     
