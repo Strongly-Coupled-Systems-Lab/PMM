@@ -727,118 +727,73 @@ class PMMInSitu:
         
         return np.clip(fp_dim_GHz, 0.0, ceiling)
 
-
+        
 
     def BulbSetting_BOLSIG(self, fp, knob = 0.5, scale = 1.0):
-        """
-        Maps plasma frequency value in GHz to a current and voltage setting for
-        the DC power supplies. Based on the fit: fp = 13.5 / (1 + exp(-9 * (I - 13.9)))**(1/6) + amp_offset
-        - Below 0.5 GHz, the bulb is off.
-        - From 0.5 to 2.7 GHz, it's current-controlled (30V fixed).
-        - Above 2.7 GHz, it's voltage-controlled (10A fixed).
+            """
+            Maps plasma frequency value in GHz to a current and voltage setting for
+            the DC power supplies using updated linear (current) and log (voltage) fits:
+            Current (Linear):   fp(I) = S * ( (0.6 + 0.65*k) + 0.2*I )
+            Voltage (Log):      fp(V) = S * ( (10.5 + 2.5*k) * log5(V - 4.8) - 4.5 )
 
-        Args:
-            fp: plasma frequency in GHz (NOT rad/s)
-            knob: constant to tune experimental fit to lower and upper range of
-                  cases. knob = 0 is low end and knob = 1 is high end.
-            scale: Parameter that scales the overall plasma frequency values.
-        """
-        k = knob
-        S = scale
+            Args:
+                fp: plasma frequency in GHz (NOT rad/s)
+                knob: constant to tune experimental fit. knob = 0 is low end
+                    (bottom curve) and knob = 1 is high end (top curve).
+                scale: Parameter that scales the overall plasma frequency values.
+            """
+            k = knob
+            S = scale
 
-        if fp/S < 0.5: # For very low frequencies, the bulb remains off.
-            return (0,0)
-        
-        elif fp/S < 3.16: # The current-controlled regime (Voltage is fixed at 20V). fp = 13.5 / (1 + exp(-9 * (I - 13.9)))**(1/6) + amp_offset
-            I = ((fp/S) - 0.85) * (13.0/3.0)
-            return (20, min(max(I, 0.1), 10.0)) # Clamp current between 0.1A and 10A.
+            I_min, I_max = 0.1, 10.0 # Amps
+            V_min, V_max = 6.0, 20.0 # Volts
 
-        else: # The voltage-controlled regime (Current is fixed at 10A). fp = 10 * log(V - 4.8)/log(5) - 4.5 + volt_offset
-            V = 5.0**(((fp/S) - (6*k) + 4.5) / 11.9) + 4.8 # Solved from the logarithmic fit for voltage (V).
-            return (min(max(V, 0.0), 20.0), 10) # Clamp voltage between 0V and 20V.
-        
+            Min_curr = S * ( (0.6 + 0.65*k) + 0.2*I_min )
+            Max_curr = S * ( (0.6 + 0.65*k) + 0.2*I_max )
 
+            Min_volt = S * ( (10.5 + 2.5*k) * np.log(V_min - 4.8) / np.log(5) - 4.5 )
+            Max_volt = S * ( (10.5 + 2.5*k) * np.log(V_max - 4.8) / np.log(5) - 4.5 )
 
-    def BulbSetting_BOLSIG_NewDC(self, fp, knob=0.3, scale=1.2):
-        """
-        Maps plasma frequency value in GHz to a current and voltage setting for
-        the DC power supplies.
-        """
-        k = knob
-        S = scale
-        fp_scaled = fp / max(S, 1e-9)
+            if fp < Min_curr/2:
+                return (0,0)
 
-        B_offset = 1.7 * k
-        A_coeff = 10.0 + 3.8 * k
+            elif fp >= Min_curr/2 and fp < Min_curr:
+                # Ignition: Set to max voltage and calculate current for Min_curr boundary
+                # Inverse of Current formula: I = (fp/S - (0.6 + 0.65*k)) / 0.2
+                I = (Min_curr/S - (0.6 + 0.65*k)) / 0.2
+                return (20, I) # Use new max voltage
 
-        I_MIN, I_MAX = 0.1, 10.0
-        V_MIN, V_MAX = 6.0, 20.0
-        V_CC = 16.0   # current-control voltage
-        V_IGN = 18.0  # ignition voltage 
+            elif fp >= Min_curr and fp < Max_curr:
+                # Current-controlled region: V is fixed, I is varied
+                I = (fp/S - (0.6 + 0.65*k)) / 0.2
+                return (20, I) # Use new max voltage
 
-        # Helper: map V to fp for boundaries
-        def fp_from_V(V):
-            return A_coeff * (np.log(max(V - 4.8, 5e-6)) / np.log(5.0)) - 4.5
+            elif fp >= Max_curr and fp < Min_volt:
+                # Transition region between max current and min voltage
+                if fp < Max_curr+(Min_volt-Max_curr)/2:
+                    # Lower half: stay at max current setting
+                    I = (Max_curr/S - (0.6 + 0.65*k)) / 0.2
+                    return (20, I) # Use new max voltage
+                else:
+                    # Upper half: switch to max current and calculate voltage for Min_volt boundary
+                    # Inverse of Voltage formula: V = 5**((fp/S + 4.5)/(10.5 + 2.5*k)) + 4.8
+                    V = np.power(5, (Min_volt/S + 4.5)/(10.5 + 2.5*k)) + 4.8
+                    return (V, 10) # Use max current
 
-        # Boundaries in fp space
-        Min_curr_fp = (3.0 / 13.0) * I_MIN + B_offset
-        Max_curr_fp = (3.0 / 13.0) * I_MAX + B_offset
-        Min_volt_fp = fp_from_V(V_MIN)
-        Max_volt_fp = fp_from_V(V_MAX)
+            elif fp >= Min_volt and fp <= Max_volt:
+                # Voltage-controlled region: I is fixed, V is varied
+                V = np.power(5, (fp/S + 4.5)/(10.5 + 2.5*k)) + 4.8
+                return (V, 10) # Use max current
 
-        
-        # Zones:
-        # 1) Off
-        if fp_scaled < 0.6 * Min_curr_fp:
-            if self.verbose:
-                print(f"[BulbSetting_BOLSIG_NewDC] zone=OFF fp={fp:.4g} scaled={fp_scaled:.4g} -> V=0.000 I=0.000")
-            return (0.0, 0.0)
+            elif fp > Max_volt:
+                # Saturation: return max settings
+                return (20, 10) # Use new max voltage
 
-        # 2) Ignition
-        if fp_scaled < Min_curr_fp:
-            if self.verbose:
-                print(f"[BulbSetting_BOLSIG_NewDC] zone=IGNITION fp={fp:.4g} scaled={fp_scaled:.4g} -> V={V_IGN:.3f} I={1.0:.3f}")
-            return (V_IGN, 1.0)
-
-        # 3) Current-controlled zone
-        if fp_scaled < Max_curr_fp:
-            I = (fp_scaled - B_offset) * (13.0 / 3.0)
-            I = np.clip(I, I_MIN, I_MAX)
-            V = V_CC
-            if self.verbose:
-                print(f"[BulbSetting_BOLSIG_NewDC] zone=CURRENT fp={fp:.4g} scaled={fp_scaled:.4g} -> V={V:.3f} I={I:.3f}")
-            return (V_CC, I)
-
-        # 4) Transition zone: blend from (V_CC, I_MAX) to (V_MIN, I_MAX)
-        if fp_scaled < Min_volt_fp:
-            denom = max(Min_volt_fp - Max_curr_fp, 1e-6)
-            x = (fp_scaled - Max_curr_fp) / denom
-            w = np.clip(x, 0.0, 1.0)
-            w = w * w * (3.0 - 2.0 * w) # smoothstep for gradual rather than sharp
-            V = (1.0 - w) * V_CC + w * V_MIN
-            if self.verbose:
-                print(f"[BulbSetting_BOLSIG_NewDC] zone=TRANSITION fp={fp:.4g} scaled={fp_scaled:.4g} -> V={float(V):.3f} I={I_MAX:.3f}")
-            return (V, I_MAX)
-
-        # 5) Voltage-controlled zone: I fixed, V varies smoothly 6–20 V
-        if fp_scaled <= Max_volt_fp:
-            V = np.power(5.0, (fp_scaled + 4.5) / max(A_coeff, 1e-6)) + 4.8
-            V = float(np.clip(V, V_MIN, V_MAX))
-            if self.verbose:
-                print(f"[BulbSetting_BOLSIG_NewDC] zone=VOLTAGE fp={fp:.4g} scaled={fp_scaled:.4g} -> V={V:.3f} I={I_MAX:.3f}")
-            return (V, I_MAX)
-
-        # 6) Max cap
-        if self.verbose:
-            print(f"[BulbSetting_BOLSIG_NewDC] zone=MAX_CAP fp={fp:.4g} scaled={fp_scaled:.4g} -> V={V_MAX:.3f} I={I_MAX:.3f}")
-        return (V_MAX, I_MAX)
     
     def BulbSetting_VOLTAGE_ONLY(self, x, V_min=6.0, V_max=20.0, I_fixed=10.0, tau=4.0):
         """
-        Direct voltage control:
-        - x is the optimizer's parameter (use rho[i])
-        - V = affine(tanh(x/tau)) in [V_min, V_max]
-        - I is fixed at I_fixed (10 A)
+        Voltage control.
+        I is fixed at I_fixed (10 A)
         """
         s = 0.5*(1.0 + np.tanh(x/float(tau))) #maybe not tanh?
         V = V_min + (V_max - V_min)*s
@@ -900,7 +855,7 @@ class PMMInSitu:
         BulbSet = np.zeros((rho.shape[0], 2))
         for i in range(rho.shape[0]):
             # ignore fp; drive voltage directly from rho
-            V, I = self.BulbSetting_VOLTAGE_ONLY(rho[i], V_min=6.0, V_max=20.0, I_fixed=10.0, tau=4.0)
+            V, I = self.BulbSetting_BOLSIG(rho[i], V_min=6.0, V_max=20.0, I_fixed=10.0, tau=4.0)
             BulbSet[i,:] = (V, I)
         return BulbSet
 
