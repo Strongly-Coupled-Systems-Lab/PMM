@@ -1515,56 +1515,71 @@ class PMMInSitu:
                 block = bulbs[idx]
                 bulbs = np.delete(bulbs, idx)
 
-                d = block.size
                 base = np.copy(rho)
 
-                if verbose:
-                    print("-"*80)
-                    print("Bulbs sampled:", block + 1)
-                    print("fp before:", self.Scale_Rho_fp(base[block], self.f_a(fpm)))
-                    print("-"*80)
+                # --- 1) DOUBLE-CALL BASELINE + FROZEN NORMS ---
+                # bootstrap norms (value is 0 by design)
+                _, base_norms = self.Wvg_Obj_Get(
+                    base, fpm, k, S, f, df, objective, [], duty_cycle
+                )
+                # real baseline using those norms
+                base_val, _ = self.Wvg_Obj_Get(
+                    base, fpm, k, S, f, df, objective, base_norms, duty_cycle
+                )
 
-                # evaluate objective for a delta
-                def eval_delta(delta_vec): 
-                    nonlocal norms
+                # --- 2) Candidate evaluator with FROZEN base_norms ---
+                def eval_delta(delta_vec):
                     delta = np.clip(np.asarray(delta_vec, float), -p_range, p_range)
                     trial = np.copy(base)
                     trial[block] = base[block] + delta
-                    val, nrm = self.Wvg_Obj_Get(
-                        trial, fpm, k, S, f, df, objective, norms, duty_cycle
+                    trial = np.clip(trial, 0.0, self.f_a(fpm))  # keep sane range
+                    val, _ = self.Wvg_Obj_Get(
+                        trial, fpm, k, S, f, df, objective, base_norms, duty_cycle
                     )
-                    norms = nrm
                     return float(val)
 
-                # minimize the negative objective via BO
-                def skopt_obj(x): return -eval_delta(x) # objective
-                space = [Real(-p_range, p_range, name=f"d{i}") for i in range(d)] #defining search space
+                def skopt_obj(x):
+                    return -eval_delta(x)
 
-                # Safety: skopt requires n_calls >= n_init
+                from skopt.space import Real
+                space = [Real(-p_range, p_range, name=f"d{i}") for i in range(block.size)]
                 n_calls_eff = max(int(n_calls), int(n_init))
                 n_init_eff  = min(int(n_init), n_calls_eff)
 
-                res = gp_minimize( # bayesian optimizer (gaussian process surrogate)
+                res = gp_minimize(
                     skopt_obj, space,
                     n_calls=n_calls_eff,
                     n_initial_points=n_init_eff,
-                    noise="gaussian"
+                    noise="gaussian",
+                    acq_func="EI",
+                    acq_func_kwargs={"xi": 0.02}
                 )
 
-                # apply best delta from BO
                 best_delta = np.array(res.x, float)
-                rho[block] = base[block] + best_delta
-                best_val = -res.fun  # maximize original objective
+                trial_after = np.copy(base)
+                trial_after[block] = base[block] + best_delta
+                trial_after = np.clip(trial_after, 0.0, self.f_a(fpm))
 
-                # per-sample print 
+                # --- 3) REVERT IF WORSE (compare apples-to-apples with same norms) ---
+                final_val, _ = self.Wvg_Obj_Get(
+                    trial_after, fpm, k, S, f, df, objective, base_norms, duty_cycle
+                )
+
+                if final_val >= base_val - 1e-6:
+                    rho[block] = trial_after[block]   # commit
+                    best_val = final_val
+                else:
+                    rho[block] = base[block]          # revert
+                    best_val = base_val
+
                 rho_evolution = np.row_stack([rho_evolution, rho])
                 obj.append(best_val)
                 print("Epoch: %3d/%3d | Sample: %3d/%3d | Value: %5e"
                     % (e+1, epochs, s_count, per_epoch, best_val))
 
-                # save after each sample 
                 self.Save_Params(rho_evolution, rho_path)
                 self.Save_Params(np.array(obj), obj_path)
+
 
             # end-of-epoch print
             t_epoch_end = time.time()
