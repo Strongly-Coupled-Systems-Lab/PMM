@@ -728,16 +728,16 @@ class PMMInSitu:
         return np.clip(fp_dim_GHz, 0.0, ceiling)
 
         
-
-    def BulbSetting_BOLSIG(self, fp, knob = 0.5, scale = 1.0):
+    @staticmethod
+    def BulbSetting_BOLSIG(fp, knob = 0.5, scale = 1.0): #add self back in when not static
             """
             Maps plasma frequency value in GHz to a current and voltage setting for
             the DC power supplies using updated linear (current) and log (voltage) fits:
-            Current (Linear):   fp(I) = S * ( (0.6 + 0.65*k) + 0.2*I )
-            Voltage (Log):      fp(V) = S * ( (10.5 + 2.5*k) * log5(V - 4.8) - 4.5 )
+            Current: fp(I) = S * ( (0.6 + 0.65*k) + 0.2*I )
+            Voltage: fp(V) = S * ( (10.5 + 2.5*k) * log5(V - 4.8) - 4.5 )
 
             Args:
-                fp: plasma frequency in GHz (NOT rad/s)
+                fp: plasma frequency in GHz 
                 knob: constant to tune experimental fit. knob = 0 is low end
                     (bottom curve) and knob = 1 is high end (top curve).
                 scale: Parameter that scales the overall plasma frequency values.
@@ -748,7 +748,7 @@ class PMMInSitu:
             I_min, I_max = 0.1, 10.0 # Amps
             V_min, V_max = 6.0, 20.0 # Volts
 
-            Min_curr = S * ( (0.6 + 0.65*k) + 0.2*I_min )
+            Min_curr = S * ( (0.6 + 0.65*k) + 0.2*I_min ) #simplified
             Max_curr = S * ( (0.6 + 0.65*k) + 0.2*I_max )
 
             Min_volt = S * ( (10.5 + 2.5*k) * np.log(V_min - 4.8) / np.log(5) - 4.5 )
@@ -759,16 +759,15 @@ class PMMInSitu:
 
             elif fp >= Min_curr/2 and fp < Min_curr:
                 # Ignition: Set to max voltage and calculate current for Min_curr boundary
-                # Inverse of Current formula: I = (fp/S - (0.6 + 0.65*k)) / 0.2
-                I = (Min_curr/S - (0.6 + 0.65*k)) / 0.2
+                I = (Min_curr/S - (0.6 + 0.65*k)) / 0.2 # Inverse of Current
                 return (20, I) # Use new max voltage
 
-            elif fp >= Min_curr and fp < Max_curr:
+            elif fp >= Min_curr and fp < Max_curr: 
                 # Current-controlled region: V is fixed, I is varied
                 I = (fp/S - (0.6 + 0.65*k)) / 0.2
                 return (20, I) # Use new max voltage
 
-            elif fp >= Max_curr and fp < Min_volt:
+            elif fp >= Max_curr and fp < Min_volt: # this is IMPOSSIBLE
                 # Transition region between max current and min voltage
                 if fp < Max_curr+(Min_volt-Max_curr)/2:
                     # Lower half: stay at max current setting
@@ -776,8 +775,7 @@ class PMMInSitu:
                     return (20, I) # Use new max voltage
                 else:
                     # Upper half: switch to max current and calculate voltage for Min_volt boundary
-                    # Inverse of Voltage formula: V = 5**((fp/S + 4.5)/(10.5 + 2.5*k)) + 4.8
-                    V = np.power(5, (Min_volt/S + 4.5)/(10.5 + 2.5*k)) + 4.8
+                    V = np.power(5, (Min_volt/S + 4.5)/(10.5 + 2.5*k)) + 4.8 # Inverse of voltage
                     return (V, 10) # Use max current
 
             elif fp >= Min_volt and fp <= Max_volt:
@@ -789,19 +787,34 @@ class PMMInSitu:
                 # Saturation: return max settings
                 return (20, 10) # Use new max voltage
 
+    def BulbSetting_BOLSIG_Fix(self, fp, knob=0.5, scale=1.0):
+        """
+        Voltage-only version of BulbSetting_BOLSIG.
+        """
+        k = knob
+        S = scale
+
+        V_min = 7.0
+        V_max = 20.0
+        I_fixed = 10.0
+
+        # fp(V) = S * ( (10.5 + 2.5*k) * log5(V - 4.8) - 4.5 )
+        Min_volt = S * ((10.5 + 2.5*k) * np.log(V_min - 4.8) / np.log(5) - 4.5)
+        Max_volt = S * ((10.5 + 2.5*k) * np.log(V_max - 4.8) / np.log(5) - 4.5)
+
+        if fp <= Min_volt:
+            return (0.0, 0.0)  # <-- only change
+        elif fp <= Max_volt:
+            # inverse of the same voltage fit:
+            # V(fp) = 5^((fp/S + 4.5)/(10.5 + 2.5*k)) + 4.8
+            V = np.power(5.0, (fp / S + 4.5) / (10.5 + 2.5*k)) + 4.8
+            V = float(np.clip(V, V_min, V_max))
+            return (V, I_fixed)
+        else:
+            return (V_max, I_fixed)
+
+
     
-    def BulbSetting_VOLTAGE_ONLY(self, x, V_min=6.0, V_max=20.0, I_fixed=10.0, tau=4.0):
-        """
-        Voltage control.
-        I is fixed at I_fixed (10 A)
-        """
-        s = 0.5*(1.0 + np.tanh(x/float(tau))) #maybe not tanh?
-        V = V_min + (V_max - V_min)*s
-        return (float(V), float(I_fixed))
-
-
-
-
     def Rho_to_Bulb(self, rho, wp_max, knob = 0.5, scale = 1.0,\
                     ballast = 'New'):
         """
@@ -820,46 +833,11 @@ class PMMInSitu:
 
         for i in range(rho.shape[0]):
             if ballast == 'New':
-                BulbSet[i,:] = self.BulbSetting_BOLSIG_NewDC(fp[i], knob, scale)
+                BulbSet[i,:] = self.BulbSetting_BOLSIG_Fix(fp[i], knob, scale)
             else:
-                BulbSet[i,:] = self.BulbSetting_BOLSIG(fp[i], knob, scale)
+                BulbSet[i,:] = self.BulbSetting_BOLSIG_Fix(fp[i], knob, scale)
 
         return BulbSet
-
-
-    def Rho_to_Bulb_Fixold(self, rho, wp_max, knob = 0.5, scale = 1.0,\
-                    ballast = 'New'):
-        """
-        Accepts optimal parameter array (MUST BE FLATTENED) and returns (V,I)
-        for each bulb.
-
-        Args:
-            rho: optimal parameter array (flattened) from PMMInverse library
-            wp_max: Approximate maximum non-dimensionalized plasma frequency
-            knob: constant to tune experimental fit to lower and upper range of
-                  BOLSIG cases. knob = 0 is low end and knob = 1 is high end.
-            scale: Parameter that scales the overall plasma frequency values.
-        """
-        BulbSet = np.zeros((rho.shape[0],2))
-        fp = self.Scale_Rho_fp(rho, wp_max)
-
-        for i in range(rho.shape[0]):
-            if ballast == 'New':
-                BulbSet[i,:] = self.BulbSetting_BOLSIG_NewDC(fp[i], knob, scale)
-            else:
-                BulbSet[i,:] = self.BulbSetting_BOLSIG(fp[i], knob, scale)
-
-        return BulbSet
-    
-    def Rho_to_Bulb_Fix(self, rho, wp_max, knob=0.5, scale=1.0, ballast='New'):
-        BulbSet = np.zeros((rho.shape[0], 2))
-        for i in range(rho.shape[0]):
-            # ignore fp; drive voltage directly from rho
-            V, I = self.BulbSetting_BOLSIG(rho[i], V_min=6.0, V_max=20.0, I_fixed=10.0, tau=4.0)
-            BulbSet[i,:] = (V, I)
-        return BulbSet
-
-
 
     
     def ArraySet_Rho(self, rho, wp_max, knob = 0.5, scale = 1.0, ballast = 'New', verbose=None):
@@ -869,7 +847,7 @@ class PMMInSitu:
         """
         v = self.verbose if (verbose is None) else verbose
 
-        BulbSet = self.Rho_to_Bulb_Fix(rho, wp_max, knob, scale, ballast)
+        BulbSet = self.Rho_to_Bulb(rho, wp_max, knob, scale, ballast)
         activate = 14 if ballast == 'New' else 12
 
         self.Set_Bulb_VI('all', activate, 10, verbose=False)
@@ -1611,6 +1589,10 @@ class PMMInSitu:
                 finally:
                     self.Deactivate_Bulb('all')
                 s_param_savepath = progress_dir + f'/Wvg_{f:.1f}GHz_fpm_{fpm:.1f}GHz_k{k:.1f}_S{S:.1f}_epoch_{e+1}.pdf'
+                csv_savepath = s_param_savepath.replace('.pdf', '.csv') #also csv
+                np.savetxt(csv_savepath, #also csv
+                        np.column_stack([freq_snap/1e9, s21_snap, s31_snap]),
+                        delimiter=',', header='freq_GHz,S21_dB,S31_dB', comments='')
                 self.Trans_Plot_2Port(
                     s_param_savepath, freq_snap/1e9, s21_snap, s31_snap,
                     fpm, k, S, f=[f], f_win=fwin, show=show
