@@ -803,7 +803,7 @@ class PMMInSitu:
         Max_volt = S * ((10.5 + 2.5*k) * np.log(V_max - 4.8) / np.log(5) - 4.5)
 
         if fp <= Min_volt:
-            return (0.0, 0.0)  # <-- only change
+            return (0.0, 0.0)  # <-- only change...maybe make this small not zero?
         elif fp <= Max_volt:
             # inverse of the same voltage fit:
             # V(fp) = 5^((fp/S + 4.5)/(10.5 + 2.5*k)) + 4.8
@@ -1489,16 +1489,21 @@ class PMMInSitu:
         print("="*80)
 
         # initial objective (Epoch 0)
-        if (len(obj) == 0) or restart_obj:
+        # initial objective (Epoch 0) — get fixed norms once, then baseline using them
+        if (len(obj) == 0) or restart_obj or (len(norms) == 0):
             t1 = time.time()
-            o, norms = self.Wvg_Obj_Get(rho, fpm, k, S, f, df, objective, [], duty_cycle)
-            obj.append(o)
+            # first call just to obtain norms (apples-to-apples scaling)
+            _, norms = self.Wvg_Obj_Get(rho, fpm, k, S, f, df, objective, [], duty_cycle)
+            # real baseline objective using those fixed norms
+            o0, _ = self.Wvg_Obj_Get(rho, fpm, k, S, f, df, objective, norms, duty_cycle)
+            obj = [o0]  # reset to a comparable baseline
             t2 = time.time()
             print("="*80)
             print("Epoch: %3d/%3d | Duration: %.2f secs | Value: %5e"
-                % (0, epochs, t2 - t1, o))
+                % (0, epochs, t2 - t1, o0))
             print("="*80)
             self.Save_Params(np.array(norms), nrm_path)
+
 
         # main loop
         for e in range(epochs):
@@ -1517,25 +1522,17 @@ class PMMInSitu:
 
                 base = np.copy(rho)
 
-                # --- 1) DOUBLE-CALL BASELINE + FROZEN NORMS ---
-                # bootstrap norms (value is 0 by design)
-                _, base_norms = self.Wvg_Obj_Get(
-                    base, fpm, k, S, f, df, objective, [], duty_cycle
-                )
-                # real baseline using those norms
                 base_val, _ = self.Wvg_Obj_Get(
-                    base, fpm, k, S, f, df, objective, base_norms, duty_cycle
-                )
+                    base, fpm, k, S, f, df, objective, norms, duty_cycle)
 
-                # --- 2) Candidate evaluator with FROZEN base_norms ---
+
                 def eval_delta(delta_vec):
                     delta = np.clip(np.asarray(delta_vec, float), -p_range, p_range)
                     trial = np.copy(base)
                     trial[block] = base[block] + delta
                     trial = np.clip(trial, 0.0, self.f_a(fpm))  # keep sane range
                     val, _ = self.Wvg_Obj_Get(
-                        trial, fpm, k, S, f, df, objective, base_norms, duty_cycle
-                    )
+                        trial, fpm, k, S, f, df, objective, norms, duty_cycle)
                     return float(val)
 
                 def skopt_obj(x):
@@ -1551,8 +1548,7 @@ class PMMInSitu:
                     n_calls=n_calls_eff,
                     n_initial_points=n_init_eff,
                     noise="gaussian",
-                    acq_func="EI",
-                    acq_func_kwargs={"xi": 0.02}
+                    acq_func="EI"
                 )
 
                 best_delta = np.array(res.x, float)
@@ -1562,9 +1558,8 @@ class PMMInSitu:
 
                 # --- 3) REVERT IF WORSE (compare apples-to-apples with same norms) ---
                 final_val, _ = self.Wvg_Obj_Get(
-                    trial_after, fpm, k, S, f, df, objective, base_norms, duty_cycle
-                )
-
+                    trial_after, fpm, k, S, f, df, objective, norms, duty_cycle)
+                
                 if final_val >= base_val - 1e-6:
                     rho[block] = trial_after[block]   # commit
                     best_val = final_val
