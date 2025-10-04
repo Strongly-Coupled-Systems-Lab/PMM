@@ -653,6 +653,31 @@ class PMMInSitu:
                                                     value = 0, functioncode = 6)
         return
 
+    def Check_Power_Healthy(self, min_v=6.5, min_i=0.5, pause=0.0, verbose=None):
+        """
+        Verifies each supply is ON and has non-trivial set V/I.
+        Returns (ok, bad_list). bad_list = [(addr, on, V, I), ...].
+        """
+        v = self.verbose if (verbose is None) else verbose
+        bad = []
+        for addr in self.bulbs:
+            if addr == 'all':
+                continue
+            try:
+                inst = self.bulbs[addr]['Inst']
+                on = inst.read_register(0x1004)
+                setV = inst.read_register(0x1000) / 100.0
+                setI = inst.read_register(0x1001) / 100.0
+                if (on != 1) or (setV < min_v) or (setI < min_i):
+                    bad.append((addr, on, setV, setI))
+            except Exception:
+                bad.append((addr, -1, -1.0, -1.0))  # unreadable = failure
+            if pause > 0:
+                time.sleep(pause)
+        if v and bad:
+            print("[Check_Power_Healthy] FAIL:", bad)
+        return (len(bad) == 0), bad
+
 
 
     def Scale_Rho_ne(self, rho, wp_max):
@@ -803,7 +828,8 @@ class PMMInSitu:
         Max_volt = S * ((10.5 + 2.5*k) * np.log(V_max - 4.8) / np.log(5) - 4.5)
 
         if fp <= Min_volt:
-            return (0.0, 0.0)  # <-- only change...maybe make this small not zero?
+            #return (0.0, 0.0)  # <-- only change...maybe make this small not zero?
+            return(7.0, 1.0)
         elif fp <= Max_volt:
             # inverse of the same voltage fit:
             # V(fp) = 5^((fp/S + 4.5)/(10.5 + 2.5*k)) + 4.8
@@ -1508,6 +1534,9 @@ class PMMInSitu:
         # main loop
         for e in range(epochs):
             t_epoch_start = time.time()
+            
+            rho_epoch_start = np.copy(rho)
+
 
             bulbs = bulbs_all.copy()
             s_count = 0
@@ -1566,6 +1595,19 @@ class PMMInSitu:
                 else:
                     rho[block] = base[block]          # revert
                     best_val = base_val
+                    
+                if verbose:
+                    # How much did commanded V change for this block?
+                    V_before = self.Rho_to_Bulb(base,        self.f_a(fpm), knob=k, scale=S)[:, 0]
+                    V_after  = self.Rho_to_Bulb(rho,         self.f_a(fpm), knob=k, scale=S)[:, 0]
+                    dV_block = V_after[block] - V_before[block]
+                    big = np.where(np.abs(dV_block) > 0.1)[0]
+                    print(f"[epoch {e+1} sample {s_count}] ΔV>0.1V on {len(big)}/{block.size} bulbs")
+                    if len(big) > 0:
+                        addrs = (block[big] + 1).tolist()
+                        deltas = np.round(dV_block[big], 3).tolist()
+                        print(f"  addrs={addrs}  ΔV(V)={deltas}")
+
 
                 rho_evolution = np.row_stack([rho_evolution, rho])
                 obj.append(best_val)
@@ -1582,6 +1624,26 @@ class PMMInSitu:
             print("Epoch: %3d/%3d | Duration: %.2f secs | Value: %5e"
                 % (e+1, epochs, t_epoch_end - t_epoch_start, obj[-1]))
             print("="*80)
+            
+            if verbose:
+                V0 = self.Rho_to_Bulb(rho_epoch_start, self.f_a(fpm), knob=k, scale=S)[:, 0]
+                V1 = self.Rho_to_Bulb(rho,              self.f_a(fpm), knob=k, scale=S)[:, 0]
+                dV = V1 - V0
+                n_big = int(np.sum(np.abs(dV) > 0.1))
+                print(f"[epoch {e+1}] bulbs with |ΔV|>0.1V: {n_big}/{num_bulbs}")
+
+            
+            # Safety: stop if any supply looks off
+            ok, bad = self.Check_Power_Healthy(min_v=6.5, min_i=0.5, verbose=True)
+            if not ok:
+                print(">>> STOPPING: Some supplies are OFF or below thresholds:")
+                for (addr, on, vset, iset) in bad:
+                    print(f"    addr {addr:3d} | ON={on} | Vset={vset:.2f} V | Iset={iset:.2f} A")
+                try:
+                    self.Deactivate_Bulb('all')
+                finally:
+                    raise RuntimeError("Power check failed; optimization aborted for safety.")
+
 
             # Plot every epoch except the final one 
             if e < epochs - 1:
