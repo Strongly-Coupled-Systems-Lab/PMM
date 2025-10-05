@@ -653,30 +653,30 @@ class PMMInSitu:
                                                     value = 0, functioncode = 6)
         return
 
-    def Check_Power_Healthy(self, min_v=6.5, min_i=0.5, pause=0.0, verbose=None):
-        """
-        Verifies each supply is ON and has non-trivial set V/I.
-        Returns (ok, bad_list). bad_list = [(addr, on, V, I), ...].
-        """
-        v = self.verbose if (verbose is None) else verbose
-        bad = []
-        for addr in self.bulbs:
-            if addr == 'all':
-                continue
-            try:
-                inst = self.bulbs[addr]['Inst']
-                on = inst.read_register(0x1004)
-                setV = inst.read_register(0x1000) / 100.0
-                setI = inst.read_register(0x1001) / 100.0
-                if (on != 1) or (setV < min_v) or (setI < min_i):
-                    bad.append((addr, on, setV, setI))
-            except Exception:
-                bad.append((addr, -1, -1.0, -1.0))  # unreadable = failure
-            if pause > 0:
-                time.sleep(pause)
-        if v and bad:
-            print("[Check_Power_Healthy] FAIL:", bad)
-        return (len(bad) == 0), bad
+    # def Check_Power_Healthy(self, min_v=6.5, min_i=0.5, pause=0.0, verbose=None):
+    #     """
+    #     Verifies each supply is ON and has non-trivial set V/I.
+    #     Returns (ok, bad_list). bad_list = [(addr, on, V, I), ...].
+    #     """
+    #     v = self.verbose if (verbose is None) else verbose
+    #     bad = []
+    #     for addr in self.bulbs:
+    #         if addr == 'all':
+    #             continue
+    #         try:
+    #             inst = self.bulbs[addr]['Inst']
+    #             on = inst.read_register(0x1004)
+    #             setV = inst.read_register(0x1000) / 100.0
+    #             setI = inst.read_register(0x1001) / 100.0
+    #             if (on != 1) or (setV < min_v) or (setI < min_i):
+    #                 bad.append((addr, on, setV, setI))
+    #         except Exception:
+    #             bad.append((addr, -1, -1.0, -1.0))  # unreadable = failure
+    #         if pause > 0:
+    #             time.sleep(pause)
+    #     if v and bad:
+    #         print("[Check_Power_Healthy] FAIL:", bad)
+    #     return (len(bad) == 0), bad
 
 
 
@@ -1540,10 +1540,45 @@ class PMMInSitu:
 
             bulbs = bulbs_all.copy()
             s_count = 0
+            force_change_next = False
 
             # --- Drain until empty: take chunks of size min(sample, remaining) ---
             while bulbs.size > 0:
                 s_count += 1
+                # If last sample reverted / made zero change, force a small random nudge this time
+                if force_change_next:
+                    take = min(sample, bulbs.size)
+                    idx = np.random.choice(bulbs.size, size=take, replace=False)
+                    block = bulbs[idx]
+                    bulbs = np.delete(bulbs, idx)
+
+                    base = np.copy(rho)
+
+                    # guaranteed non-zero move (kept within safe range)
+                    forced = np.random.uniform(-p_range, p_range, size=block.size)
+                    trial_after = np.copy(base)
+                    trial_after[block] = np.clip(base[block] + forced, 0.0, self.f_a(fpm))
+
+                    # commit without revert gate (we *want* a change)
+                    rho[block] = trial_after[block]
+
+                    # log/track
+                    best_val, _ = self.Wvg_Obj_Get(rho, fpm, k, S, f, df, objective, norms, duty_cycle)
+                    if verbose:
+                        V_before = self.Rho_to_Bulb(base, self.f_a(fpm), knob=k, scale=S)[:, 0]
+                        V_after  = self.Rho_to_Bulb(rho,  self.f_a(fpm), knob=k, scale=S)[:, 0]
+                        dV_block = (V_after - V_before)[block]
+                        print(f"[epoch {e+1} sample {s_count}] FORCED change; ΔV(V)={np.round(dV_block,3).tolist()}")
+
+                    rho_evolution = np.row_stack([rho_evolution, rho])
+                    obj.append(best_val)
+                    print("Epoch: %3d/%3d | Sample: %3d/%3d | Value: %5e (forced)"
+                        % (e+1, epochs, s_count, per_epoch, best_val))
+                    self.Save_Params(rho_evolution, rho_path)
+                    self.Save_Params(np.array(obj), obj_path)
+
+                    force_change_next = False
+                    continue
                 take = min(sample, bulbs.size)
                 idx = np.random.choice(bulbs.size, size=take, replace=False)
                 block = bulbs[idx]
@@ -1595,18 +1630,15 @@ class PMMInSitu:
                 else:
                     rho[block] = base[block]          # revert
                     best_val = base_val
+                    force_change_next = True
                     
                 if verbose:
-                    # How much did commanded V change for this block?
-                    V_before = self.Rho_to_Bulb(base,        self.f_a(fpm), knob=k, scale=S)[:, 0]
-                    V_after  = self.Rho_to_Bulb(rho,         self.f_a(fpm), knob=k, scale=S)[:, 0]
-                    dV_block = V_after[block] - V_before[block]
-                    big = np.where(np.abs(dV_block) > 0.1)[0]
-                    print(f"[epoch {e+1} sample {s_count}] ΔV>0.1V on {len(big)}/{block.size} bulbs")
-                    if len(big) > 0:
-                        addrs = (block[big] + 1).tolist()
-                        deltas = np.round(dV_block[big], 3).tolist()
-                        print(f"  addrs={addrs}  ΔV(V)={deltas}")
+                    # ΔV list relative to the previous step (before commit)
+                    V_before_all = self.Rho_to_Bulb(base, self.f_a(fpm), knob=k, scale=S)[:, 0]
+                    V_after_all  = self.Rho_to_Bulb(rho,  self.f_a(fpm), knob=k, scale=S)[:, 0]
+                    dV_all = V_after_all - V_before_all
+                    print(f"[epoch {e+1} sample {s_count}] ΔV_all(V)={np.round(dV_all, 3).tolist()}")
+
 
 
                 rho_evolution = np.row_stack([rho_evolution, rho])
@@ -1628,21 +1660,8 @@ class PMMInSitu:
             if verbose:
                 V0 = self.Rho_to_Bulb(rho_epoch_start, self.f_a(fpm), knob=k, scale=S)[:, 0]
                 V1 = self.Rho_to_Bulb(rho,              self.f_a(fpm), knob=k, scale=S)[:, 0]
-                dV = V1 - V0
-                n_big = int(np.sum(np.abs(dV) > 0.1))
-                print(f"[epoch {e+1}] bulbs with |ΔV|>0.1V: {n_big}/{num_bulbs}")
-
-            
-            # Safety: stop if any supply looks off
-            ok, bad = self.Check_Power_Healthy(min_v=6.5, min_i=0.5, verbose=True)
-            if not ok:
-                print(">>> STOPPING: Some supplies are OFF or below thresholds:")
-                for (addr, on, vset, iset) in bad:
-                    print(f"    addr {addr:3d} | ON={on} | Vset={vset:.2f} V | Iset={iset:.2f} A")
-                try:
-                    self.Deactivate_Bulb('all')
-                finally:
-                    raise RuntimeError("Power check failed; optimization aborted for safety.")
+                dV_epoch = V1 - V0
+                print(f"[epoch {e+1}] ΔV_epoch_all(V)={np.round(dV_epoch, 3).tolist()}")
 
 
             # Plot every epoch except the final one 
