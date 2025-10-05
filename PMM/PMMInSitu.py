@@ -1530,7 +1530,8 @@ class PMMInSitu:
             print("="*80)
             self.Save_Params(np.array(norms), nrm_path)
 
-
+        force_change_next = False
+        
         # main loop
         for e in range(epochs):
             t_epoch_start = time.time()
@@ -1540,7 +1541,6 @@ class PMMInSitu:
 
             bulbs = bulbs_all.copy()
             s_count = 0
-            force_change_next = False
 
             # --- Drain until empty: take chunks of size min(sample, remaining) ---
             while bulbs.size > 0:
@@ -1555,7 +1555,7 @@ class PMMInSitu:
                     base = np.copy(rho)
 
                     # guaranteed non-zero move (kept within safe range)
-                    forced = np.random.uniform(-p_range, p_range, size=block.size)
+                    forced = 0.05 * np.random.uniform(-p_range, p_range, size=block.size)
                     trial_after = np.copy(base)
                     trial_after[block] = np.clip(base[block] + forced, 0.0, self.f_a(fpm))
 
@@ -1639,6 +1639,8 @@ class PMMInSitu:
                     dV_all = V_after_all - V_before_all
                     print(f"[epoch {e+1} sample {s_count}] ΔV_all(V)={np.round(dV_all, 3).tolist()}")
 
+                if np.max(np.abs(dV_all)) < 1e-3:   # choose tolerance like 1mV
+                    force_change_next = True
 
 
                 rho_evolution = np.row_stack([rho_evolution, rho])
@@ -1668,7 +1670,9 @@ class PMMInSitu:
             if e < epochs - 1:
                 print(f"--- Plotting intermediate results for Epoch {e + 1} ---")
                 obj_savepath = progress_dir + f'/obj_Wvg_{f:.1f}GHz_fpm_{fpm:.1f}GHz{ID}_epoch_{e+1}.pdf'
-                self.Plot_Obj(obj_savepath, np.array(obj), show=show)
+                #self.Plot_Obj(obj_savepath, np.array(obj), show=show)
+                self.Plot_Obj(obj_savepath, np.array(obj[per_epoch::per_epoch]), show=show)
+
 
                 best_iter_so_far = int(np.argmax(np.array(obj)))
                 best_rho_for_plot = rho_evolution[best_iter_so_far, :]
@@ -1696,8 +1700,10 @@ class PMMInSitu:
             fpm, k, S, f, fwin=fwin, show=show
         )
         self.Plot_Obj(
+            # f"{progress_dir}/obj_Wvg_{f:.1f}GHz_fpm_{fpm:.1f}GHz{ID}.pdf",
+            # np.array(obj)
             f"{progress_dir}/obj_Wvg_{f:.1f}GHz_fpm_{fpm:.1f}GHz{ID}.pdf",
-            np.array(obj)
+            np.array(obj[per_epoch::per_epoch])
         )
         return
 
