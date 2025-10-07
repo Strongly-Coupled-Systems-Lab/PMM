@@ -828,8 +828,8 @@ class PMMInSitu:
         Max_volt = S * ((10.5 + 2.5*k) * np.log(V_max - 4.8) / np.log(5) - 4.5)
 
         if fp <= Min_volt:
-            #return (0.0, 0.0)  # <-- only change...maybe make this small not zero?
-            return(7.0, 1.0)
+            return (0.0, 0.0)  # <-- only change...maybe make this small not zero?
+            # return(7.0, 1.0)
         elif fp <= Max_volt:
             # inverse of the same voltage fit:
             # V(fp) = 5^((fp/S + 4.5)/(10.5 + 2.5*k)) + 4.8
@@ -1752,6 +1752,11 @@ class PMMInSitu:
                         %(f,fpm,k,S)
         self.Trans_Plot_2Port(savepath, freq/10**9, S21, S31, fpm, k, S,\
                               f = [f], f_win = fwin, show = show)
+        
+        csvpath = savepath.replace('.pdf', '.csv')
+        np.savetxt(csvpath,
+                np.column_stack([freq/1e9, S21, S31]),
+                delimiter=',', header='freq_GHz,S21_dB,S31_dB', comments='')
 
         return
 
