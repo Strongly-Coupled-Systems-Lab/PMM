@@ -206,6 +206,72 @@ def Waveguide_Obj_dB(freq, S21, S31, f, df = 0.25, norms = []):
         new_norms = [np.abs(correct), np.abs(incorrect)]
         return 0, new_norms
 
+def save_progress_callback(rho_path, obj_path, pmm_instance, fpm, k, S, f, fwin, show, progress_dir):
+    """
+    After each NEW evaluation from gp_minimize:
+      - append rho and objective to CSVs
+      - save objective PDF (per call)
+      - run+save transmission PDF+CSV (per call)
+    """
+    def _callback(res):
+        import numpy as np, os
+
+        # 1) Append latest data (skopt minimizes => store positive objective)
+        new_rho = np.atleast_2d(res.x_iters[-1])
+        new_obj = np.array([-res.func_vals[-1]])
+        with open(rho_path, 'ab') as f_rho, open(obj_path, 'ab') as f_obj:
+            np.savetxt(f_rho, new_rho, delimiter=',')
+            np.savetxt(f_obj, new_obj, delimiter=',')
+
+        # 2) Read accumulated data (for plotting)
+        all_rhos = np.loadtxt(rho_path, delimiter=',')
+        all_objs = np.loadtxt(obj_path, delimiter=',')
+
+        if np.ndim(all_objs) == 0:
+            all_objs = np.array([float(all_objs)])
+        else:
+            all_objs = np.array(all_objs).flatten()
+
+        if np.ndim(all_rhos) == 1:
+            all_rhos = np.array([all_rhos])
+
+        call_idx = len(all_objs)
+        print(f"\n[Callback] Saving per-call plots (call {call_idx})")
+
+        # 3) Objective plot per call
+        obj_plot_path = obj_path.replace('.csv', f'_call{call_idx:03d}.pdf')
+        try:
+            pmm_instance.Plot_Obj(obj_plot_path, all_objs, show=False)
+        except Exception as e:
+            print(f"[WARN] Obj plot failed on call {call_idx}: {e}")
+
+        # 4) Transmission plot+csv per call (measure best-so-far)
+        try:
+            best_rho = all_rhos[np.argmax(all_objs)]
+            # This call writes a fixed filename first:
+            pmm_instance.Wvg_Run_And_Plot(
+                progress_dir, best_rho, fpm, k, S, f, fwin=fwin, show=show
+            )
+            # Rename fixed filenames → per-call filenames
+            base = os.path.join(
+                progress_dir, f"Wvg_{f:.1f}GHz_fpm_{fpm:.1f}GHz_k{k:.1f}_S{S:.1f}"
+            )
+            src_pdf = base + ".pdf"
+            src_csv = base + ".csv"
+            dst_pdf = base + f"_call{call_idx:03d}.pdf"
+            dst_csv = base + f"_call{call_idx:03d}.csv"
+            if os.path.exists(src_pdf):
+                os.replace(src_pdf, dst_pdf)
+                print(f"    [✓] Spectrum PDF → {dst_pdf}")
+            if os.path.exists(src_csv):
+                os.replace(src_csv, dst_csv)
+                print(f"    [✓] Spectrum CSV → {dst_csv}")
+        except Exception as e:
+            print(f"[WARN] Spectrum plot/rename failed on call {call_idx}: {e}")
+
+    return _callback
+
+
 
 ###############################################################################
 ## In-situ inverse design class
@@ -828,7 +894,7 @@ class PMMInSitu:
         Max_volt = S * ((10.5 + 2.5*k) * np.log(V_max - 4.8) / np.log(5) - 4.5)
 
         if fp <= Min_volt:
-            return (0.0, 0.0)  # <-- only change...maybe make this small not zero?
+            return (0.0, 0.0)  # <-- only change...maybe make this small not zero? maybe i should go back to including current stuff...
             # return(7.0, 1.0)
         elif fp <= Max_volt:
             # inverse of the same voltage fit:
@@ -1460,7 +1526,7 @@ class PMMInSitu:
     
 
 
-    def optimize_waveguide_bayes(self, epochs, rho, fpm, k, S, f,
+    def optimize_waveguide_bayes_old(self, epochs, rho, fpm, k, S, f,
         df=0.5, sample=12, p_range=0.10,
         n_calls=15, n_init=5,
         objective='comp', wu=10, progress_dir='.',
@@ -1707,7 +1773,111 @@ class PMMInSitu:
         )
         return
 
-    
+    def optimize_waveguide_bayes(self, n_total_calls, rho, fpm, k, S, f,
+                             df=0.5, n_initial_points=10,
+                             objective='comp', wu=10, progress_dir='.',
+                             fwin=[], duty_cycle=0.5, show=True, ID=''):
+        import os
+        import numpy as np
+        from skopt import gp_minimize
+        from skopt.space import Real
+
+        os.makedirs(progress_dir, exist_ok=True)
+
+        # Define file paths
+        rho_path = f"{progress_dir}/rho_Wvg_{f:.1f}GHz_fpm_{fpm:.1f}GHz{ID}.csv"
+        obj_path = f"{progress_dir}/obj_Wvg_{f:.1f}GHz_fpm_{fpm:.1f}GHz{ID}.csv"
+        nrm_path = f"{progress_dir}/norms_Wvg_{f:.1f}GHz_fpm_{fpm:.1f}GHz{ID}.csv"
+
+        # --- ENSURE NORMS EXIST (compute or load once) ---
+        norms = None
+        if os.path.isfile(nrm_path):
+            print(f"Loading norms from {nrm_path}")
+            norms = np.loadtxt(nrm_path, delimiter=',')
+            if np.ndim(norms) == 0:
+                norms = [norms]
+        else:
+            print("No existing norms found. Computing initial norms...")
+            _, norms = self.Wvg_Obj_Get(rho, fpm, k, S, f, df, objective, [], duty_cycle)
+            np.savetxt(nrm_path, np.array(norms), delimiter=',')
+            print(f"Saved new norms to {nrm_path}")
+
+        # --- WARM/COLD START DETECTION (KEEPING WARM START) ---
+        x0_initial, y0_initial = None, None
+        n_calls_remaining = n_total_calls
+        is_warm_start = False
+
+        if os.path.isfile(rho_path) and os.path.isfile(obj_path):
+            print("="*80)
+            print("Found existing logs. Attempting WARM START...")
+            loaded_rhos = self.Read_Params(rho_path)
+            loaded_objs = self.Read_Params(obj_path)
+
+            if loaded_rhos.ndim == 1: loaded_rhos = np.array([loaded_rhos])
+            if loaded_objs.ndim == 0: loaded_objs = np.array([loaded_objs])
+
+            if loaded_rhos.shape[0] == loaded_objs.shape[0]:
+                x0_initial = loaded_rhos.tolist()
+                y0_initial = (-loaded_objs).tolist()  # negate for minimizer
+                is_warm_start = True
+
+                n_done = len(x0_initial)
+                n_calls_remaining = n_total_calls - n_done
+                if n_calls_remaining <= 0:
+                    print(f"Optimization already completed {n_done}/{n_total_calls} calls. Exiting.")
+                    return
+                print(f"Loaded {n_done} evaluations. Running for {n_calls_remaining} more.")
+                print("="*80)
+            else:
+                print("Warning: Log file mismatch. Starting fresh.")
+                x0_initial = [rho.tolist()]
+        else:
+            print("No logs found. Starting COLD START.")
+            x0_initial = [rho.tolist()]
+
+        # If COLD start, truncate/create empty CSVs so the callback appends cleanly
+        if not is_warm_start:
+            open(rho_path, 'w').close()
+            open(obj_path, 'w').close()
+
+        # --- DEFINE OBJECTIVE FUNCTION ---
+        def full_objective_function(rho_candidate):
+            rho_candidate = np.array(rho_candidate)
+            val, _ = self.Wvg_Obj_Get(
+                rho_candidate, fpm, k, S, f, df, objective, norms, duty_cycle
+            )
+            return -val  # negative for minimization
+
+        # --- ALWAYS use the callback (cold AND warm) ---
+        callback_handler = save_progress_callback(
+            rho_path, obj_path, self, fpm, k, S, f, fwin, show, progress_dir
+        )
+
+        # --- RUN THE OPTIMIZER ---
+        result = gp_minimize(
+            func=full_objective_function,
+            dimensions=[Real(0.0, self.f_a(fpm), name=f"rho_{i}") for i in range(rho.shape[0])],
+            x0=x0_initial,
+            y0=y0_initial,
+            n_calls=n_calls_remaining,
+            n_initial_points=max(0, n_initial_points - (len(x0_initial) if is_warm_start else 0)),
+            noise="gaussian",
+            acq_func="EI",
+            callback=callback_handler
+        )
+
+        # --- FINAL PROCESSING ---
+        all_rhos_tested = np.array(result.x_iters)
+        all_objs_achieved = -np.array(result.func_vals)
+        best_rho_found = all_rhos_tested[np.argmax(all_objs_achieved)]
+
+        print("\nOptimization complete. Best objective found: ", np.max(all_objs_achieved))
+
+        # Final plot of the best state + overall objective PDF (not per-call; callback already saved per-call)
+        self.Wvg_Run_And_Plot(progress_dir, best_rho_found, fpm, k, S, f, fwin=fwin, show=show)
+        self.Plot_Obj(obj_path.replace('.csv', '.pdf'), all_objs_achieved, show=show)
+
+        return
     
     def Wvg_Obj_Get(self, rho, fpm, k, S, f, df = 0.25,\
                     objective = 'comp', norms = [], duty_cycle = 0.5):
