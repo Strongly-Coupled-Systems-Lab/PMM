@@ -239,16 +239,84 @@ def Waveguide_Obj_dB(freq, S21, S31, f, df = 0.25, norms = []):
         new_norms = [np.abs(correct), np.abs(incorrect)]
         return 0, new_norms
 
+# def save_progress_callback(rho_path, obj_path, pmm_instance, fpm, k, S, f, fwin, show, progress_dir):
+#     """
+#     After each NEW evaluation from gp_minimize:
+#       - append rho and objective to CSVs
+#       - save objective PDF (per call)
+#       - run+save transmission PDF+CSV (per call)
+#     """
+#     def _callback(res):
+#         import numpy as np, os
+
+#         # 1) Append latest data (skopt minimizes => store positive objective)
+#         new_rho = np.atleast_2d(res.x_iters[-1])
+#         new_obj = np.array([-res.func_vals[-1]])
+#         with open(rho_path, 'ab') as f_rho, open(obj_path, 'ab') as f_obj:
+#             np.savetxt(f_rho, new_rho, delimiter=',')
+#             np.savetxt(f_obj, new_obj, delimiter=',')
+
+#         # 2) Read accumulated data (for plotting)
+#         all_rhos = np.loadtxt(rho_path, delimiter=',')
+#         all_objs = np.loadtxt(obj_path, delimiter=',')
+
+#         if np.ndim(all_objs) == 0:
+#             all_objs = np.array([float(all_objs)])
+#         else:
+#             all_objs = np.array(all_objs).flatten()
+
+#         if np.ndim(all_rhos) == 1:
+#             all_rhos = np.array([all_rhos])
+
+#         call_idx = len(all_objs)
+#         print(f"\n[Callback] Saving per-call plots (call {call_idx})")
+
+#         # 3) Objective plot per call
+#         obj_plot_path = obj_path.replace('.csv', f'_call{call_idx:03d}.pdf')
+#         try:
+#             pmm_instance.Plot_Obj(obj_plot_path, all_objs, show=False)
+#         except Exception as e:
+#             print(f"[WARN] Obj plot failed on call {call_idx}: {e}")
+
+#         # 4) Transmission plot+csv per call (measure best-so-far)
+#         try:
+#             best_rho = all_rhos[np.argmax(all_objs)]
+#             # This call writes a fixed filename first:
+#             pmm_instance.Wvg_Run_And_Plot(
+#                 progress_dir, best_rho, fpm, k, S, f, fwin=fwin, show=show
+#             )
+#             # Rename fixed filenames → per-call filenames
+#             base = os.path.join(
+#                 progress_dir, f"Wvg_{f:.1f}GHz_fpm_{fpm:.1f}GHz_k{k:.1f}_S{S:.1f}"
+#             )
+#             src_pdf = base + ".pdf"
+#             src_csv = base + ".csv"
+#             dst_pdf = base + f"_call{call_idx:03d}.pdf"
+#             dst_csv = base + f"_call{call_idx:03d}.csv"
+#             if os.path.exists(src_pdf):
+#                 os.replace(src_pdf, dst_pdf)
+#                 print(f"    [✓] Spectrum PDF → {dst_pdf}")
+#             if os.path.exists(src_csv):
+#                 os.replace(src_csv, dst_csv)
+#                 print(f"    [✓] Spectrum CSV → {dst_csv}")
+#         except Exception as e:
+#             print(f"[WARN] Spectrum plot/rename failed on call {call_idx}: {e}")
+
+#     return _callback
+
 def save_progress_callback(rho_path, obj_path, pmm_instance, fpm, k, S, f, fwin, show, progress_dir):
     """
     After each NEW evaluation from gp_minimize:
       - append rho and objective to CSVs
       - save objective PDF (per call)
       - run+save transmission PDF+CSV (per call)
+      - PRINT per-bulb V/I and per-bulb Δ from last run
     """
-    def _callback(res):
-        import numpy as np, os
+    import os, numpy as np
 
+    last_bulbset_path = os.path.join(progress_dir, "last_bulbset.npy")
+
+    def _callback(res):
         # 1) Append latest data (skopt minimizes => store positive objective)
         new_rho = np.atleast_2d(res.x_iters[-1])
         new_obj = np.array([-res.func_vals[-1]])
@@ -256,20 +324,48 @@ def save_progress_callback(rho_path, obj_path, pmm_instance, fpm, k, S, f, fwin,
             np.savetxt(f_rho, new_rho, delimiter=',')
             np.savetxt(f_obj, new_obj, delimiter=',')
 
-        # 2) Read accumulated data (for plotting)
+        # 2) Load all to determine call index
         all_rhos = np.loadtxt(rho_path, delimiter=',')
         all_objs = np.loadtxt(obj_path, delimiter=',')
-
-        if np.ndim(all_objs) == 0:
-            all_objs = np.array([float(all_objs)])
-        else:
-            all_objs = np.array(all_objs).flatten()
-
-        if np.ndim(all_rhos) == 1:
-            all_rhos = np.array([all_rhos])
-
+        if np.ndim(all_objs) == 0: all_objs = np.array([float(all_objs)])
+        if np.ndim(all_rhos) == 1: all_rhos = np.array([all_rhos])
         call_idx = len(all_objs)
+
         print(f"\n[Callback] Saving per-call plots (call {call_idx})")
+
+        # === NEW: print per-bulb V/I and Δ since last call ===
+        try:
+            # Current bulb settings from rho -> fp -> (V,I)
+            bulbset_now = pmm_instance.Rho_to_Bulb(
+                new_rho[0], pmm_instance.f_a(fpm), knob=k, scale=S
+            )  # shape (Nbulbs, 2) columns = [V, I]
+            V_now = bulbset_now[:, 0]
+            I_now = bulbset_now[:, 1]
+
+            # Load previous bulbset if exists to compute deltas
+            if os.path.exists(last_bulbset_path):
+                bulbset_prev = np.load(last_bulbset_path)
+                dV = V_now - bulbset_prev[:, 0]
+                dI = I_now - bulbset_prev[:, 1]
+            else:
+                bulbset_prev = None
+                dV = np.zeros_like(V_now)
+                dI = np.zeros_like(I_now)
+
+            # Print nicely (truncate if huge)
+            np.set_printoptions(precision=3, suppress=True)
+            print(f"[BulbSet] V (volts): {V_now.tolist()}")
+            print(f"[BulbSet] I (amps):  {I_now.tolist()}")
+            if bulbset_prev is None:
+                print("[BulbSet] ΔV/ΔI: (first call → no previous state; deltas shown as 0.0)")
+            else:
+                print(f"[BulbSet] ΔV: {dV.tolist()}")
+                print(f"[BulbSet] ΔI: {dI.tolist()}")
+
+            # Save current bulbset for next-call delta
+            np.save(last_bulbset_path, bulbset_now)
+        except Exception as e:
+            print(f"[WARN] Could not compute/print bulb settings: {e}")
 
         # 3) Objective plot per call
         obj_plot_path = obj_path.replace('.csv', f'_call{call_idx:03d}.pdf')
@@ -281,28 +377,24 @@ def save_progress_callback(rho_path, obj_path, pmm_instance, fpm, k, S, f, fwin,
         # 4) Transmission plot+csv per call (measure best-so-far)
         try:
             best_rho = all_rhos[np.argmax(all_objs)]
-            # This call writes a fixed filename first:
             pmm_instance.Wvg_Run_And_Plot(
-                progress_dir, best_rho, fpm, k, S, f, fwin=fwin, show=show
+                progress_dir, best_rho, fpm, k, S, f, fwin=fwin, show=show  # show=True will pop the plot
             )
-            # Rename fixed filenames → per-call filenames
             base = os.path.join(
                 progress_dir, f"Wvg_{f:.1f}GHz_fpm_{fpm:.1f}GHz_k{k:.1f}_S{S:.1f}"
             )
-            src_pdf = base + ".pdf"
-            src_csv = base + ".csv"
+            src_pdf = base + ".pdf";  src_csv = base + ".csv"
             dst_pdf = base + f"_call{call_idx:03d}.pdf"
             dst_csv = base + f"_call{call_idx:03d}.csv"
             if os.path.exists(src_pdf):
-                os.replace(src_pdf, dst_pdf)
-                print(f"    [✓] Spectrum PDF → {dst_pdf}")
+                os.replace(src_pdf, dst_pdf);  print(f"    [✓] Spectrum PDF → {dst_pdf}")
             if os.path.exists(src_csv):
-                os.replace(src_csv, dst_csv)
-                print(f"    [✓] Spectrum CSV → {dst_csv}")
+                os.replace(src_csv, dst_csv);  print(f"    [✓] Spectrum CSV → {dst_csv}")
         except Exception as e:
             print(f"[WARN] Spectrum plot/rename failed on call {call_idx}: {e}")
 
     return _callback
+
 
 
 
