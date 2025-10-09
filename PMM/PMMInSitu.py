@@ -177,6 +177,39 @@ def Waveguide_Obj_Comp(freq, S21, S31, f, df = 0.25, norms = []):
         new_norms = [np.abs(correct), np.abs(incorrect)]
         return 0, new_norms
 
+def Waveguide_Obj_Narrow(freq, S21, S31, f, df=0.25, norms=[],
+                         w_in=1.0, w_oob=0.5):
+    """
+    Narrow-band objective: reward in-band to Port-2 and 
+    penalize in-band Port-3 and out-of-band Port-2/Port-3 leakage.
+
+    freq in GHz; Sxx in dB.
+    
+    Increase w_oob if wanting stricter.
+    """
+    import numpy as np
+    i_l = np.searchsorted(freq, f - df/2, side='left')
+    i_r = np.searchsorted(freq, f + df/2, side='right')
+
+    T21 = np.power(10.0, S21/10.0)
+    T31 = np.power(10.0, S31/10.0)
+
+    # in-band
+    in21 = np.sum(T21[i_l:i_r])
+    in31 = np.sum(T31[i_l:i_r])
+
+    # out-of-band (everything except the in-band slice)
+    oob21 = np.sum(T21[:i_l]) + np.sum(T21[i_r:])
+    oob31 = np.sum(T31[:i_l]) + np.sum(T31[i_r:])
+
+    if len(norms) > 0:
+        in21 /= norms[0]; in31 /= norms[1]; oob21 /= norms[2]; oob31 /= norms[3]
+        return (w_in*in21) - (in31 + w_oob*(oob21 + oob31)), norms
+    else:
+        new_norms = [abs(in21), abs(in31), abs(oob21), abs(oob31)]
+        # return a neutral value and the norms on first pass
+        return 0.0, new_norms
+
 
 def Waveguide_Obj_dB(freq, S21, S31, f, df = 0.25, norms = []):
     """
@@ -1899,6 +1932,8 @@ class PMMInSitu:
             return Waveguide_Obj_Comp(freq/10**9, S21, S31, f, df, norms)
         elif objective == 'dB':
             return Waveguide_Obj_dB(freq/10**9, S21, S31, f, df, norms)
+        elif objective == 'narrow':  # <--- add this
+            return Waveguide_Obj_Narrow(freq/1e9, S21, S31, f, df, norms, w_in=1.0, w_oob=0.5)
         else:
             raise RuntimeError("That objective has not been implemented")
 
