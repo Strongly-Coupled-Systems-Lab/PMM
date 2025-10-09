@@ -886,10 +886,12 @@ class PMMInSitu:
 
         return ne
 
-    def Scale_Rho_fp_old(self, rho, wp_max):
+    def Scale_Rho_fp_legacy(self, rho, wp_max):
         """
         Uses an arctan barrier to map optimal parameters from the computational 
         inverse design library to plasma frequency values (dimensionalized, GHz)
+        
+        USE THIS WHEN TESTING SIMULATION PARAMETERS.
 
         Args:
             rho: Parameters being optimized
@@ -899,6 +901,7 @@ class PMMInSitu:
         fp_dim = fp*c/self.a/10**9
 
         return fp_dim
+
 
     def Scale_Rho_fp(self, rho, wp_max):
         """
@@ -910,7 +913,7 @@ class PMMInSitu:
             wp_max: Approximate maximum non-dimensionalized plasma frequency
         """
         fp_nd = np.clip(rho, 0.0, None) # making it only positive
-        #fp_nd = (wp_max / 1.2) * np.arctan(rho_pos / (wp_max / 10))
+        #fp_nd = (wp_max / 1.2) * np.arctan(rho_pos / (wp_max / 10)) #use for
         fp_dim_GHz = fp_nd * c / self.a / 1e9 # convert to GHz
         ceiling = getattr(self, "fp_ceiling_GHz", 20.0)  # hardware safety limit
         
