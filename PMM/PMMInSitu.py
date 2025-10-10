@@ -37,6 +37,16 @@ epso = 8.8541878128*10**(-12)
 muo = 4*np.pi*10**(-7)
 me = 9.1093837015*10**(-31)
 
+MAPPING_IN_SILICO_TO_ADDRM1 = np.array([
+    40, 50, 30, 60, 21, 69, 13, 77, 6, 84, 0, 90,
+    51, 39, 41, 49, 31, 59, 22, 68, 14, 76, 7, 83,
+    1, 89, 61, 29, 52, 38, 42, 48, 32, 58, 23, 67,
+    15, 75, 8, 82, 2, 88, 70, 20, 62, 28, 53, 37,
+    43, 47, 33, 57, 24, 66, 16, 74, 9, 81, 3, 87,
+    78, 12, 71, 19, 63, 27, 54, 36, 44, 46, 34, 56,
+    25, 65, 17, 73, 10, 80, 4, 86, 85, 79, 72, 64,
+    55, 45, 35, 26, 18, 11, 5], dtype=int)  # len=91; out[M[i]] = rho[i]
+
 def serial_ports():
     """ Lists serial port names
 
@@ -891,14 +901,28 @@ class PMMInSitu:
         Uses an arctan barrier to map optimal parameters from the computational 
         inverse design library to plasma frequency values (dimensionalized, GHz)
         
+        Also remaps rho from in-silico ordering to physical (bulb_addr - 1).
+        
         USE THIS WHEN TESTING SIMULATION PARAMETERS.
 
         Args:
             rho: Parameters being optimized
             wp_max: Approximate maximum non-dimensionalized plasma frequency
         """
+        rho = np.asarray(rho).ravel() # make sure 1D
+        
+        # ---- UNSCRAMBLE: in-silico index -> physical index (addr-1)
+        M = MAPPING_IN_SILICO_TO_ADDRM1
+        if rho.size != M.size:
+            raise ValueError(f"Mapping length {M.size} != rho length {rho.size}")
+        rho_perm = np.empty_like(rho)
+        rho_perm[M] = rho  # place each rho[i] into position M[i]
+        
+        # legacy scaling
         fp = (wp_max/1.5)*np.arctan(np.abs(rho)/(wp_max/7.5))
         fp_dim = fp*c/self.a/10**9
+        
+        print("legacy parameters")
 
         return fp_dim
 

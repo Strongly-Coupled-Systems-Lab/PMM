@@ -4,7 +4,7 @@
 #addresses must correspond to the array coordinates mod 128;
 #slave id = (i+array-x*j)%128 where i is the x-coordinate and j is the y-coordinate
 
-array-a: 0.02 #lattice constant in m
+array-a: 0.0215 #lattice constant in m
 array-x: 10 #xdim of array
 array-y: 10 #ydim of array
 mobility: 0 #electron mobility, in m^2/V/s
