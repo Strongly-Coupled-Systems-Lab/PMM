@@ -495,10 +495,12 @@ class PMMInSitu:
     
     
     def __init__(self, conf_file, conf_dir = './../confs/', verbose=False):
-        self.verbose = verbose  
-
+        self.verbose = verbose 
+        
         with open(conf_file, 'r') as conf:
             self.config = yaml.load(conf, Loader=yaml.SafeLoader)
+            
+        self.swap_ports = bool(self.config.get('swap_ports', False)) # for yaml
 
         self.a = self.config['array-a']
         self.mu = self.config['mobility']
@@ -1171,6 +1173,8 @@ class PMMInSitu:
                     S21 = np.array(S21_str.split(','), dtype=float)
                     S31 = np.array(S31_str.split(','), dtype=float)
                     freq = np.array(freq_str.split(','), dtype=float)
+                    if self.swap_ports:
+                        S21, S31 = S31, S21
                     return freq, S21, S31
                 else:
                     raise ValueError("VNA returned empty data.")

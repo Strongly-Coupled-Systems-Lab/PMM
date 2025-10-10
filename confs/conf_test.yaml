@@ -23,6 +23,8 @@ serial_ports:
   /dev/tty.usbserial-B0013LEA: [81, 82, 83, 84, 85, 86, 87, 88, 89, 90]
   /dev/tty.usbserial-B00295EU: [91]
 
+swap_ports: false # if true, make sure to turn on in init fxn
+
 #VNA: 'USB0::0x0AAD::0x0119::022019943::0::INSTR' #VNA resource address for RSInstrument
 VNA: 'USB0::0x0AAD::0x01C0::101603::INSTR' #VNA resource address for RSInstrument
 
