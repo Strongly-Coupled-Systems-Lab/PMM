@@ -46,6 +46,8 @@ MAPPING_IN_SILICO_TO_ADDRM1 = np.array([
     78, 12, 71, 19, 63, 27, 54, 36, 44, 46, 34, 56,
     25, 65, 17, 73, 10, 80, 4, 86, 85, 79, 72, 64,
     55, 45, 35, 26, 18, 11, 5], dtype=int)  # len=91; out[M[i]] = rho[i]
+# corrected: make cell indices (1-based concept) line up with 0-based Python
+MAPPING_IN_SILICO_TO_ADDRM1_FIX = np.roll(MAPPING_IN_SILICO_TO_ADDRM1, -1)
 
 def serial_ports():
     """ Lists serial port names
@@ -500,7 +502,7 @@ class PMMInSitu:
         with open(conf_file, 'r') as conf:
             self.config = yaml.load(conf, Loader=yaml.SafeLoader)
             
-        self.swap_ports = bool(self.config.get('swap_ports', False)) # for yaml
+        self.swap_ports = bool(self.config.get('swap_ports', True)) # for yaml
 
         self.a = self.config['array-a']
         self.mu = self.config['mobility']
@@ -914,19 +916,19 @@ class PMMInSitu:
         rho = np.asarray(rho).ravel() # make sure 1D
         
         # ---- UNSCRAMBLE: in-silico index -> physical index (addr-1)
-        M = MAPPING_IN_SILICO_TO_ADDRM1
+        M = MAPPING_IN_SILICO_TO_ADDRM1_FIX
         if rho.size != M.size:
             raise ValueError(f"Mapping length {M.size} != rho length {rho.size}")
         rho_perm = np.empty_like(rho)
         rho_perm[M] = rho  # place each rho[i] into position M[i]
         
         # legacy scaling
-        fp = (wp_max/1.5)*np.arctan(np.abs(rho)/(wp_max/7.5))
-        fp_dim = fp*c/self.a/10**9
+        fp_nd = (wp_max/1.5)*np.arctan(np.abs(rho_perm)/(wp_max/7.5))
+        fp_dim_GHz = fp_nd*c/self.a/10**9
         
         print("legacy parameters")
 
-        return fp_dim
+        return fp_dim_GHz
 
 
     def Scale_Rho_fp(self, rho, wp_max):
