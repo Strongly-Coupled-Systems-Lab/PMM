@@ -913,14 +913,19 @@ class PMMInSitu:
             rho: Parameters being optimized
             wp_max: Approximate maximum non-dimensionalized plasma frequency
         """
+        
         rho = np.asarray(rho).ravel() # make sure 1D
         
+        # print("rho(0)",rho[0])
+        
         # ---- UNSCRAMBLE: in-silico index -> physical index (addr-1)
-        M = MAPPING_IN_SILICO_TO_ADDRM1_FIX
+        M = MAPPING_IN_SILICO_TO_ADDRM1
         if rho.size != M.size:
             raise ValueError(f"Mapping length {M.size} != rho length {rho.size}")
         rho_perm = np.empty_like(rho)
         rho_perm[M] = rho  # place each rho[i] into position M[i]
+        # print("rho(40)",rho_perm[40])
+        # print(M[0])
         
         # legacy scaling
         fp_nd = (wp_max/1.5)*np.arctan(np.abs(rho_perm)/(wp_max/7.5))
