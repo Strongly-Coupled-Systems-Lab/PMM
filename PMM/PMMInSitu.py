@@ -189,41 +189,57 @@ def Waveguide_Obj_Comp(freq, S21, S31, f, df = 0.25, norms = []):
         new_norms = [np.abs(correct), np.abs(incorrect)]
         return 0, new_norms
 
-def Waveguide_Obj_Narrow(freq, S21, S31, f, df=0.25, norms=[],
-                         w_in=1.0, w_oob=0.5, w_iso=1.0, use_db=False):
+def Waveguide_Obj_Narrow(
+    freq, S21, S31, f, df=0.25, norms=[],
+    w_in=1.0, w_oob=0.5, w_oob_l=None, w_oob_r=None
+):
     """
-    Narrow-band objective: reward in-band to Port-2 and 
-    penalize in-band Port-3 and out-of-band Port-2/Port-3 leakage.
+    Narrow-band objective.
 
-    freq in GHz; Sxx in dB.
-    
-    Increase w_oob if wanting stricter.
+    In-band (f +/- df/2): maximize (S21 - S31) in dB  -> large positive separation
+    Out-of-band: penalize (S21 - S31)^2 -> drive ports to be similar
+
+    Args:
+        freq : np.array [GHz]
+        S21  : np.array [dB]
+        S31  : np.array [dB]
+        f    : center frequency [GHz]
+        df   : bandwidth [GHz]
+        norms: optional normalization factors (filled on first call)
+        w_in : weight on in-band separation (reward)
+        w_oob: default weight for OOB penalty (if left/right not given)
+        w_oob_l, w_oob_r: optional separate OOB weights for < f-df/2 and > f+df/2
+
+    Returns:
+        (objective_value, norms)
+        On first call with norms == [], returns (0.0, new_norms)
     """
     import numpy as np
+
     i_l = np.searchsorted(freq, f - df/2, side='left')
     i_r = np.searchsorted(freq, f + df/2, side='right')
 
-    # Out-of-band always in linear power (energy leakage)
-    T21 = np.power(10.0, S21/10.0)
-    T31 = np.power(10.0, S31/10.0)
-    oob21 = np.sum(T21[:i_l]) + np.sum(T21[i_r:])
-    oob31 = np.sum(T31[:i_l]) + np.sum(T31[i_r:])
+    D = S21 - S31 # dB
 
-    # In-band: dB or power
-    if use_db:
-        in21 = np.sum(S21[i_l:i_r])        # dB sum
-        in31 = np.sum(S31[i_l:i_r])        # dB sum
-    else:
-        in21 = np.sum(T21[i_l:i_r])        # power sum
-        in31 = np.sum(T31[i_l:i_r])        # power sum
+    in_sep = np.sum(D[i_l:i_r]) # in-band reward
+
+    # out-of-band penalties
+    oob_l = np.sum((D[:i_l])**2) if i_l > 0 else 0.0
+    oob_r = np.sum((D[i_r:])**2) if i_r < D.size else 0.0
+
+    # allow asymmetric OOB weighting if want (default to w_oob)
+    if w_oob_l is None: w_oob_l = w_oob
+    if w_oob_r is None: w_oob_r = w_oob
 
     if len(norms) > 0:
-        in21 /= norms[0]; in31 /= norms[1]; oob21 /= norms[2]; oob31 /= norms[3]
-        return (w_in*in21) - (w_iso*in31 + w_oob*(oob21 + oob31)), norms
+        in_sep_n = in_sep / (norms[0] if norms[0] != 0 else 1.0)
+        oob_l_n  = oob_l  / (norms[1] if norms[1] != 0 else 1.0)
+        oob_r_n  = oob_r  / (norms[2] if norms[2] != 0 else 1.0)
+        obj = (w_in * in_sep_n) - (w_oob_l * oob_l_n + w_oob_r * oob_r_n)
+        return obj, norms
     else:
-        new_norms = [abs(in21), abs(in31), abs(oob21), abs(oob31)]
+        new_norms = [abs(in_sep) + 1e-12, abs(oob_l) + 1e-12, abs(oob_r) + 1e-12]
         return 0.0, new_norms
-
 
 
 def Waveguide_Obj_dB(freq, S21, S31, f, df = 0.25, norms = []):
