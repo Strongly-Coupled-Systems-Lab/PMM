@@ -2082,7 +2082,7 @@ class PMMInSitu:
         elif objective == 'dB':
             return Waveguide_Obj_dB(freq/10**9, S21, S31, f, df, norms)
         elif objective == 'narrow':  # <--- add this
-            return Waveguide_Obj_Narrow(freq/1e9, S21, S31, f, df, norms, w_in=1.0, w_oob=0.5, w_iso=2.0, use_db=True)
+            return Waveguide_Obj_Narrow(freq/1e9, S21, S31, f, df, norms, w_in=1.0, w_oob=0.5)
         else:
             raise RuntimeError("That objective has not been implemented")
 
