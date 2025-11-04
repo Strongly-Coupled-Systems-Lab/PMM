@@ -191,7 +191,7 @@ def Waveguide_Obj_Comp(freq, S21, S31, f, df = 0.25, norms = []):
 
 def Waveguide_Obj_Narrow(
     freq, S21, S31, f, df=0.25, norms=[],
-    w_in=1.0, w_oob=0.5, w_oob_l=None, w_oob_r=None
+    w_in=2.0, w_oob=0.5, w_oob_l=None, w_oob_r=None
 ):
     """
     Narrow-band objective.
@@ -239,6 +239,45 @@ def Waveguide_Obj_Narrow(
         return obj, norms
     else:
         new_norms = [abs(in_sep) + 1e-12, abs(oob_l) + 1e-12, abs(oob_r) + 1e-12]
+        return 0.0, new_norms
+
+
+def Waveguide_Obj_ExtraBroad(
+    freq, S21, S31,
+    f_lo=0.0, f_hi=20.0,
+    norms=[],
+    w_sep=1.0,    # reward on integrated separation
+    w_flat=0.05   # gentle penalty on roughness to avoid single narrow spikes
+):
+    """
+    Extra-broadband objective (dB-only):
+    Maximize integrated separation (S21 - S31) over [f_lo, f_hi], with a small
+    roughness penalty so the optimizer spreads performance across the band.
+
+    Returns (obj, norms). On first call with norms==[], returns (0.0, new_norms).
+    """
+    import numpy as np
+    m = (freq >= f_lo) & (freq <= f_hi)
+    if not np.any(m):
+        return (0.0, norms if norms else [1.0, 1.0])
+
+    D = (S21 - S31)[m]     # dB difference across the band
+    f_band = freq[m]
+
+    # Integrated separation in dB·GHz (trapz with freq in GHz)
+    sep = np.trapz(D, f_band)
+
+    # Roughness penalty to discourage razor-thin peaks
+    dD = np.diff(D)
+    rough = np.sum(dD**2) if dD.size else 0.0
+
+    if len(norms) > 0:
+        sep_n   = sep   / (norms[0] if norms[0] != 0 else 1.0)
+        rough_n = rough / (norms[1] if norms[1] != 0 else 1.0)
+        obj = (w_sep * sep_n) - (w_flat * rough_n)
+        return obj, norms
+    else:
+        new_norms = [abs(sep) + 1e-12, abs(rough) + 1e-12]
         return 0.0, new_norms
 
 
@@ -2083,6 +2122,10 @@ class PMMInSitu:
             return Waveguide_Obj_dB(freq/10**9, S21, S31, f, df, norms)
         elif objective == 'narrow':  # <--- add this
             return Waveguide_Obj_Narrow(freq/1e9, S21, S31, f, df, norms, w_in=1.0, w_oob=0.5)
+        elif objective == 'extra_broad':  # <--- 
+            # Max separation across the whole 0–20 GHz band; tweak weights as desired
+            return Waveguide_Obj_ExtraBroad(freq/1e9, S21, S31, f_lo=0.0, f_hi=20.0, norms=norms,
+                                            w_sep=1.0, w_flat=0.05)
         else:
             raise RuntimeError("That objective has not been implemented")
 
