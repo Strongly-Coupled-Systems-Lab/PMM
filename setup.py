@@ -17,8 +17,10 @@ setup(name="PMM",
           'scikit-image',
           'minimalmodbus',
           'pyserial',
-          'serial',
           'RSInstrument',
           'scikit-optimize',
+          'minimalmodbus',
+          'PyYAML',
+          'scikit-optimize'
           ]
       )

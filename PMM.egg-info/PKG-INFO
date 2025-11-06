@@ -15,8 +15,11 @@ Requires-Dist: ceviche
 Requires-Dist: scikit-image
 Requires-Dist: minimalmodbus
 Requires-Dist: pyserial
-Requires-Dist: serial
 Requires-Dist: RSInstrument
+Requires-Dist: scikit-optimize
+Requires-Dist: minimalmodbus
+Requires-Dist: PyYAML
+Requires-Dist: scikit-optimize
 Dynamic: author
 Dynamic: author-email
 Dynamic: download-url
