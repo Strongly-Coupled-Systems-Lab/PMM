@@ -246,6 +246,55 @@ def Waveguide_Obj_ExtraBroad(
     freq, S21, S31,
     f_lo=0.0, f_hi=20.0,
     norms=[],
+    tau=10.0,       # dB threshold for "good separation"
+    w_area=1.0,     # weight on area of positive separation
+    w_cov=0.5,      # weight on coverage (fraction above tau)
+    w_flat=0.0      # near-zero if you're ok with spikes
+):
+    """
+    Separation-first extra-broadband objective.
+    Rewards: (1) area of positive separation, (2) coverage across band.
+    Optional tiny roughness penalty if desired.
+    Returns (obj, norms); on first call with norms == [], returns (0.0, new_norms)
+    """
+    import numpy as np
+
+    m = (freq >= f_lo) & (freq <= f_hi)
+    if not np.any(m):
+        return (0.0, norms if norms else [1.0, 1.0, 1.0])
+
+    f_band = freq[m]
+    D = (S21 - S31)[m]             # dB separation
+    Dpos = np.maximum(D, 0.0)
+
+    # (1) Area of positive separation (dB·GHz)
+    area = np.trapz(Dpos, f_band)
+
+    # (2) Coverage: fraction of band above tau dB (use soft step for stability)
+    # softstep(x) ~ 0 for x<<0, ~1 for x>>0
+    k = 1.0   # softness; bigger = sharper
+    soft_above = 1.0/(1.0 + np.exp(-k*(D - tau)))
+    cov = np.trapz(soft_above, f_band) / (f_band[-1] - f_band[0] + 1e-12)
+
+    # (3) Optional roughness (very small if you tolerate spikes)
+    dD = np.diff(D)
+    rough = np.sum(dD**2) if dD.size else 0.0
+
+    if len(norms) > 0:
+        area_n  = area  / (norms[0] if norms[0] != 0 else 1.0)
+        cov_n   = cov   / (norms[1] if norms[1] != 0 else 1.0)
+        rough_n = rough / (norms[2] if norms[2] != 0 else 1.0)
+        obj = (w_area * area_n) + (w_cov * cov_n) - (w_flat * rough_n)
+        return obj, norms
+    else:
+        new_norms = [abs(area) + 1e-12, max(cov, 1e-6), abs(rough) + 1e-12]
+        return 0.0, new_norms
+
+
+def Waveguide_Obj_ExtraBroad_old(
+    freq, S21, S31,
+    f_lo=0.0, f_hi=20.0,
+    norms=[],
     w_sep=1.0,    # reward on integrated separation
     w_flat=0.05   # gentle penalty on roughness to avoid single narrow spikes
 ):
@@ -1097,7 +1146,7 @@ class PMMInSitu:
                 # Saturation: return max settings
                 return (20, 10) # Use new max voltage
 
-    def BulbSetting_BOLSIG_Fix(self, fp, knob=0.5, scale=1.0):
+    def BulbSetting_BOLSIG_Voltage(self, fp, knob=0.5, scale=1.0):
         """
         Voltage-only version of BulbSetting_BOLSIG.
         """
@@ -1109,8 +1158,11 @@ class PMMInSitu:
         I_fixed = 10.0
 
         # fp(V) = S * ( (10.5 + 2.5*k) * log5(V - 4.8) - 4.5 )
-        Min_volt = S * ((10.5 + 2.5*k) * np.log(V_min - 4.8) / np.log(5) - 4.5)
-        Max_volt = S * ((10.5 + 2.5*k) * np.log(V_max - 4.8) / np.log(5) - 4.5)
+        Min_volt = S * ((10.5 + 2.5*k) * np.log(V_min - 4.8) / np.log(5) - 4.5) #old ballasts
+        Max_volt = S * ((10.5 + 2.5*k) * np.log(V_max - 4.8) / np.log(5) - 4.5) #old ballasts
+
+        Min_volt = S * ( (10.5 + 2.5*k) * np.log(V_min - 4.8) / np.log(5) - 4.5 )
+        Max_volt = S * ( (10.5 + 2.5*k) * np.log(V_max - 4.8) / np.log(5) - 4.5 )
 
         if fp <= Min_volt:
             return (0.0, 0.0)  # <-- only change...maybe make this small not zero? maybe i should go back to including current stuff...
@@ -1118,13 +1170,115 @@ class PMMInSitu:
         elif fp <= Max_volt:
             # inverse of the same voltage fit:
             # V(fp) = 5^((fp/S + 4.5)/(10.5 + 2.5*k)) + 4.8
-            V = np.power(5.0, (fp / S + 4.5) / (10.5 + 2.5*k)) + 4.8
+            # V = np.power(5.0, (fp / S + 4.5) / (10.5 + 2.5*k)) + 4.8
+            I = (fp/S - (0.6 + 0.65*k)) / 0.2
+            V = np.power(5, (fp/S + 4.5)/(10.5 + 2.5*k)) + 4.8
             V = float(np.clip(V, V_min, V_max))
-            return (V, I_fixed)
+            return (V, I)
         else:
-            return (V_max, I_fixed)
+            return (V_max, I)
 
+    def BulbSetting_BOLSIG_Fix(self, fp, knob=0.5, scale=1.0):
+        """
+        Piecewise mapping:
+        - low fp  -> use current fit at fixed voltage
+        - high fp -> use voltage fit at fixed current
 
+        Switch point is set by the voltage fit evaluated at V = 5 V,
+        so the voltage branch starts at about 5 GHz.
+        """
+        k = knob
+        S = scale
+
+        # -----------------------------
+        # settings you may want to tweak
+        # -----------------------------
+        I_min = 0.2
+        I_search_max = 4.0       # just for finding the current-side root
+        V_min = 5.0              # make voltage branch start at 5 V
+        V_max = 20.0
+
+        V_fixed_current = 20.0   # current-fit data were taken at fixed 20 V
+        I_fixed_voltage = 10.0   # voltage-fit data were taken at fixed 10 A
+
+        # -----------------------------
+        # fitted fp(I) and fp(V)
+        # -----------------------------
+        def fp_from_I(I):
+            return S * (
+                (2.17164 + 0.30362*k)
+                + (0.28590 + 0.12268*k)*I
+                + (0.45998 - 0.01993*k)*I**2
+                + (-0.05911 + 0.01684*k)*I**3
+            )
+
+        def fp_from_V(V):
+            return S * (
+                (1.7098 + 0.9044*k)*np.log(V - 4.8)/np.log(5)
+                + (0.1346 + 0.02048*k)*(V - 4.8)**1.5
+                + (7.0415 + 1.3487*k)
+            )
+
+        # -----------------------------
+        # branch limits
+        # -----------------------------
+        fp_min = fp_from_I(I_min)
+        fp_switch = fp_from_V(V_min)
+        fp_max = fp_from_V(V_max)
+
+        # -----------------------------
+        # invert current fit: solve fp_from_I(I) = fp
+        # -----------------------------
+        def invert_current(fp_target):
+            coeffs = [
+                (-0.05911 + 0.01684*k),
+                (0.45998 - 0.01993*k),
+                (0.28590 + 0.12268*k),
+                (2.17164 + 0.30362*k) - fp_target/S
+            ]
+            roots = np.roots(coeffs)
+            roots = roots[np.isreal(roots)].real
+            roots = roots[(roots >= I_min) & (roots <= I_search_max)]
+
+            if len(roots) == 0:
+                return I_min
+
+            return float(np.min(roots))
+
+        # -----------------------------
+        # invert voltage fit by bisection
+        # -----------------------------
+        def invert_voltage(fp_target):
+            lo = V_min
+            hi = V_max
+
+            for _ in range(60):
+                mid = 0.5 * (lo + hi)
+                if fp_from_V(mid) < fp_target:
+                    lo = mid
+                else:
+                    hi = mid
+
+            return float(0.5 * (lo + hi))
+
+        # -----------------------------
+        # piecewise mapping
+        # -----------------------------
+        if fp <= fp_min:
+            return (V_fixed_current, I_min)
+
+        elif fp < fp_switch:
+            I = invert_current(fp)
+            return (V_fixed_current, I)
+
+        elif fp <= fp_max:
+            V = invert_voltage(fp)
+            return (V, I_fixed_voltage)
+
+        else:
+            return (V_max, I_fixed_voltage)
+        
+        
     
     def Rho_to_Bulb(self, rho, wp_max, knob = 0.5, scale = 1.0,\
                     ballast = 'New'):
@@ -1210,7 +1364,69 @@ class PMMInSitu:
 
         return
 
-    
+    def Apply_BulbSet(self, bulbset_VI, *, only_voltage=True, tries=3, delay=0.02):
+        """
+        *created for YouTube video
+        Write new setpoints without deactivate/ignite.
+
+        bulbset_VI: np.array shape (Nbulbs, 2) columns [V, I]
+        only_voltage: if True, write ONLY voltage register (0x1000). Faster.
+        """
+        import numpy as np, time, threading
+
+        bulbset_VI = np.asarray(bulbset_VI)
+        assert bulbset_VI.ndim == 2 and bulbset_VI.shape[1] == 2
+
+        # clamp to hardware-safe bounds (adjust if needed)
+        V = np.clip(bulbset_VI[:, 0], 0.0, 20.0)
+        I = np.clip(bulbset_VI[:, 1], 0.0, 10.0)
+
+        port_to_addrs = self.config["serial_ports"]
+
+        def write_with_retry(inst, reg, value_int):
+            for a in range(tries):
+                try:
+                    inst.write_register(registeraddress=reg, value=value_int, functioncode=6)
+                    return True
+                except Exception:
+                    time.sleep(delay)
+            return False
+
+        def process_bus(port, addr_list):
+            for addr in addr_list:
+                idx = addr - 1
+                inst = self.bulbs[addr]['Inst']
+
+                v_int = int(round(V[idx] * 100))
+                okv = write_with_retry(inst, 0x1000, v_int)
+                if not okv and self.verbose:
+                    print(f"[WARN] V write failed addr={addr}")
+
+                if not only_voltage:
+                    i_int = int(round(I[idx] * 100))
+                    oki = write_with_retry(inst, 0x1001, i_int)
+                    if not oki and self.verbose:
+                        print(f"[WARN] I write failed addr={addr}")
+
+        threads = []
+        for port, addr_list in port_to_addrs.items():
+            t = threading.Thread(target=process_bus, args=(port, addr_list))
+            t.start()
+            threads.append(t)
+        for t in threads:
+            t.join()
+
+    def limit_step(self, prev_VI, target_VI, dV_max=0.15):
+        """
+        *created for YouTube video
+        Limit per-frame voltage change (Volts). Keep current unchanged if desired.
+        """
+        import numpy as np
+        out = np.array(target_VI, float, copy=True)
+        dv = out[:,0] - prev_VI[:,0]
+        dv = np.clip(dv, -dV_max, dV_max)
+        out[:,0] = prev_VI[:,0] + dv
+        return out
 
 
     def Get_S21_S31(self):
@@ -2122,10 +2338,11 @@ class PMMInSitu:
             return Waveguide_Obj_dB(freq/10**9, S21, S31, f, df, norms)
         elif objective == 'narrow':  # <--- add this
             return Waveguide_Obj_Narrow(freq/1e9, S21, S31, f, df, norms, w_in=1.0, w_oob=0.5)
-        elif objective == 'extra_broad':  # <--- 
-            # Max separation across the whole 0–20 GHz band; tweak weights as desired
-            return Waveguide_Obj_ExtraBroad(freq/1e9, S21, S31, f_lo=0.0, f_hi=20.0, norms=norms,
-                                            w_sep=1.0, w_flat=0.05)
+        elif objective == 'extra_broad': 
+            # return Waveguide_Obj_ExtraBroad(freq/1e9, S21, S31, f_lo=0.0, f_hi=20.0, norms=norms,
+            #                                 w_sep=1.0, w_flat=0.05)
+            return Waveguide_Obj_ExtraBroad(freq/1e9, S21, S31, f_lo=0.0, f_hi=20.0, norms=norms, 
+                                            tau=10.0, w_area=1.0, w_cov=0.5,w_flat=0.0)
         else:
             raise RuntimeError("That objective has not been implemented")
 
@@ -2261,3 +2478,4 @@ class PMMInSitu:
             plt.show()
 
         return
+    
