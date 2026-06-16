@@ -189,6 +189,56 @@ def Waveguide_Obj_Comp(freq, S21, S31, f, df = 0.25, norms = []):
         new_norms = [np.abs(correct), np.abs(incorrect)]
         return 0, new_norms
 
+def Waveguide_Obj_Narrow_6Port(
+    freq, S21, S31, S41, S51, S61, f, df=0.25, norms=[],
+    w_in=1.0, w_oob=0.5
+):
+    """
+    6-port narrow-band beam steering objective.
+
+    In-band:
+        maximize S21 relative to combined leakage into S31, S41, S51, S61.
+
+    Out-of-band:
+        same idea as old narrow objective: penalize separation outside target band.
+    """
+    import numpy as np
+
+    i_l = np.searchsorted(freq, f - df/2, side='left')
+    i_r = np.searchsorted(freq, f + df/2, side='right')
+
+    # Combine all bad ports as total leaked power.
+    T_bad = (
+        10.0**(S31/10.0)
+        + 10.0**(S41/10.0)
+        + 10.0**(S51/10.0)
+        + 10.0**(S61/10.0)
+    )
+    Sbad = 10.0*np.log10(T_bad + 1e-300)
+
+    D = S21 - Sbad
+
+    in_sep = np.sum(D[i_l:i_r])
+
+    oob_l = np.sum(D[:i_l]**2) if i_l > 0 else 0.0
+    oob_r = np.sum(D[i_r:]**2) if i_r < D.size else 0.0
+
+    if len(norms) > 0:
+        in_sep_n = in_sep / (norms[0] if norms[0] != 0 else 1.0)
+        oob_l_n  = oob_l  / (norms[1] if norms[1] != 0 else 1.0)
+        oob_r_n  = oob_r  / (norms[2] if norms[2] != 0 else 1.0)
+
+        obj = w_in*in_sep_n - w_oob*(oob_l_n + oob_r_n)
+        return obj, norms
+
+    else:
+        new_norms = [
+            abs(in_sep) + 1e-12,
+            abs(oob_l) + 1e-12,
+            abs(oob_r) + 1e-12,
+        ]
+        return 0.0, new_norms
+
 def Waveguide_Obj_Narrow(
     freq, S21, S31, f, df=0.25, norms=[],
     w_in=2.0, w_oob=0.5, w_oob_l=None, w_oob_r=None
@@ -1469,6 +1519,59 @@ class PMMInSitu:
                     # return np.array([]), np.array([]), np.array([])
                     raise RuntimeError("VNA communication failed after multiple attempts. Check VNA connection and VISA settings.")
 
+    def Get_S21_S31_S41_S51_S61(self):
+        """
+        Gets freq, S21, S31, S41, S51, S61 from the R&S VNA.
+
+        Assumes:
+            Trc1 = S21
+            Trc2 = S31
+            Trc3 = S41
+            Trc4 = S51
+            Trc5 = S61
+        """
+        max_attempts = 6
+
+        for attempt in range(max_attempts):
+            try:
+                instr = RsInstrument(self.VNA)
+
+                instr.write_str('TRIGger1:SEQuence:SOURce IMM')
+                time.sleep(7)
+
+                S21_str = instr.query_str('CALC1:DATA:TRAC? "Trc1", FDAT')
+                S31_str = instr.query_str('CALC1:DATA:TRAC? "Trc2", FDAT')
+                S41_str = instr.query_str('CALC1:DATA:TRAC? "Trc3", FDAT')
+                S51_str = instr.query_str('CALC1:DATA:TRAC? "Trc4", FDAT')
+                S61_str = instr.query_str('CALC1:DATA:TRAC? "Trc5", FDAT')
+                freq_str = instr.query_str('CALC1:DATA:STIM?')
+
+                instr.write_str('TRIGger1:SEQuence:SOURce MAN')
+                instr.close()
+
+                if S21_str and S31_str and S41_str and S51_str and S61_str and freq_str:
+                    S21 = np.array(S21_str.split(','), dtype=float)
+                    S31 = np.array(S31_str.split(','), dtype=float)
+                    S41 = np.array(S41_str.split(','), dtype=float)
+                    S51 = np.array(S51_str.split(','), dtype=float)
+                    S61 = np.array(S61_str.split(','), dtype=float)
+                    freq = np.array(freq_str.split(','), dtype=float)
+
+                    return freq, S21, S31, S41, S51, S61
+
+                else:
+                    raise ValueError("VNA returned empty data for one or more 6-port traces.")
+
+            except Exception as e:
+                print(f"Warning: VNA communication failed on attempt {attempt + 1}/{max_attempts}. Error: {e}")
+                if attempt < max_attempts - 1:
+                    time.sleep(2)
+                else:
+                    raise RuntimeError(
+                        "VNA communication failed after multiple attempts. "
+                        "Check VNA connection, trace setup, and VISA settings."
+                    )
+
     def Test_Comp_Rho(self, rho, fpm, k_S = [], f_op = [], fwin = [],\
                       wu = 10, save_dir = './', duty_cycle = 0.5, show = True):
         """
@@ -2326,7 +2429,10 @@ class PMMInSitu:
         """
         self.ArraySet_Rho(rho, self.f_a(fpm), knob = k, scale = S)
         time.sleep(1)
-        freq, S21, S31 = self.Get_S21_S31()
+        if objective == 'narrow':
+            freq, S21, S31, S41, S51, S61 = self.Get_S21_S31_S41_S51_S61()
+        else:
+            freq, S21, S31 = self.Get_S21_S31()
         self.Deactivate_Bulb('all')
         time.sleep(1)
         self.Deactivate_Bulb('all')
@@ -2336,8 +2442,8 @@ class PMMInSitu:
             return Waveguide_Obj_Comp(freq/10**9, S21, S31, f, df, norms)
         elif objective == 'dB':
             return Waveguide_Obj_dB(freq/10**9, S21, S31, f, df, norms)
-        elif objective == 'narrow':  # <--- add this
-            return Waveguide_Obj_Narrow(freq/1e9, S21, S31, f, df, norms, w_in=1.0, w_oob=0.5)
+        elif objective == 'narrow':
+            return Waveguide_Obj_Narrow_6Port(freq/1e9, S21, S31, S41, S51, S61, f, df, norms, w_in=1.0, w_oob=0.5)
         elif objective == 'extra_broad': 
             # return Waveguide_Obj_ExtraBroad(freq/1e9, S21, S31, f_lo=0.0, f_hi=20.0, norms=norms,
             #                                 w_sep=1.0, w_flat=0.05)
@@ -2357,7 +2463,7 @@ class PMMInSitu:
         """
         self.ArraySet_Rho(rho, self.f_a(fpm), knob = k, scale = S)
         time.sleep(1)
-        freq, S21, S31 = self.Get_S21_S31()
+        freq, S21, S31, S41, S51, S61 = self.Get_S21_S31_S41_S51_S61()
         self.Deactivate_Bulb('all')
         time.sleep(1)
         self.Deactivate_Bulb('all')
@@ -2369,8 +2475,10 @@ class PMMInSitu:
         
         csvpath = savepath.replace('.pdf', '.csv')
         np.savetxt(csvpath,
-                np.column_stack([freq/1e9, S21, S31]),
-                delimiter=',', header='freq_GHz,S21_dB,S31_dB', comments='')
+            np.column_stack([freq/1e9, S21, S31, S41, S51, S61]),
+            delimiter=',',
+            header='freq_GHz,S21_dB,S31_dB,S41_dB,S51_dB,S61_dB',
+            comments='')
 
         return
 
