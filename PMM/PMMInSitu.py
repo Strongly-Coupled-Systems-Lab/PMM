@@ -158,6 +158,172 @@ def Demult_Obj_dB(freq, S21, S31, f1, f2, df = 0.25, norms = []):
         i_2 = isolation_2/new_norms[3]
         return c_1*c_2 + 10*i_1 + 10*i_2, new_norms
 
+def Demult_Obj_dB_6Port(freq, S21, S31, S41, S51, S61, f1, f2, df=0.25, norms=None, w_trans=0.25, w_iso=1.0):
+    """
+    Six-port demultiplexer objective.
+
+    Target routing:
+        f1 -> S21
+        f2 -> S31
+
+    At f1:
+        desired port = S21
+        undesired ports = S31, S41, S51, S61
+
+    At f2:
+        desired port = S31
+        undesired ports = S21, S41, S51, S61
+
+    norms stores the four starting-state metrics:
+        norms[0] = S21 transmission near f1
+        norms[1] = S31 transmission near f2
+        norms[2] = isolation near f1
+        norms[3] = isolation near f2
+
+    Larger objective values are better.
+    """
+
+    if norms is None:
+        norms = []
+
+    freq = np.asarray(freq, dtype=float)
+
+    S21 = np.asarray(S21, dtype=float)
+    S31 = np.asarray(S31, dtype=float)
+    S41 = np.asarray(S41, dtype=float)
+    S51 = np.asarray(S51, dtype=float)
+    S61 = np.asarray(S61, dtype=float)
+
+    traces = [S21, S31, S41, S51, S61]
+
+    if any(trace.shape != freq.shape for trace in traces):
+        raise ValueError(
+            "All six-port traces must have the same shape as freq."
+        )
+
+    # Frequency-window indices
+    i1_l = np.searchsorted(
+        freq,
+        f1 - df / 2,
+        side="left"
+    )
+    i1_r = np.searchsorted(
+        freq,
+        f1 + df / 2,
+        side="right"
+    )
+
+    i2_l = np.searchsorted(
+        freq,
+        f2 - df / 2,
+        side="left"
+    )
+    i2_r = np.searchsorted(
+        freq,
+        f2 + df / 2,
+        side="right"
+    )
+
+    if i1_l >= i1_r:
+        raise ValueError(
+            f"No VNA points were found near f1 = {f1} GHz."
+        )
+
+    if i2_l >= i2_r:
+        raise ValueError(
+            f"No VNA points were found near f2 = {f2} GHz."
+        )
+
+    # Convert dB transmission into linear power ratios.
+    T21 = 10.0**(S21 / 10.0)
+    T31 = 10.0**(S31 / 10.0)
+    T41 = 10.0**(S41 / 10.0)
+    T51 = 10.0**(S51 / 10.0)
+    T61 = 10.0**(S61 / 10.0)
+
+    # At f1, everything except S21 is leakage.
+    bad_power_f1 = (
+        T31
+        + T41
+        + T51
+        + T61
+    )
+
+    # At f2, everything except S31 is leakage.
+    bad_power_f2 = (
+        T21
+        + T41
+        + T51
+        + T61
+    )
+
+    # Convert the combined leakage powers back to dB.
+    bad_dB_f1 = 10.0 * np.log10(
+        bad_power_f1 + 1e-300
+    )
+
+    bad_dB_f2 = 10.0 * np.log10(
+        bad_power_f2 + 1e-300
+    )
+
+    # Desired absolute transmission.
+    correct_dB_f1 = float(
+        np.mean(S21[i1_l:i1_r])
+    )
+
+    correct_dB_f2 = float(
+        np.mean(S31[i2_l:i2_r])
+    )
+
+    # Desired-port transmission minus all leakage.
+    isolation_dB_f1 = float(
+        np.mean(
+            S21[i1_l:i1_r]
+            - bad_dB_f1[i1_l:i1_r]
+        )
+    )
+
+    isolation_dB_f2 = float(
+        np.mean(
+            S31[i2_l:i2_r]
+            - bad_dB_f2[i2_l:i2_r]
+        )
+    )
+
+    # First measurement establishes the baseline.
+    if len(norms) == 0:
+        new_norms = [
+            correct_dB_f1,
+            correct_dB_f2,
+            isolation_dB_f1,
+            isolation_dB_f2
+        ]
+
+        return 0.0, new_norms
+
+    if len(norms) != 4:
+        raise ValueError(
+            "Demult_Obj_dB_6Port expects four baseline metrics."
+        )
+
+    # Improvement in desired transmission relative to the initial state.
+    transmission_gain = (
+        correct_dB_f1 - norms[0]
+        + correct_dB_f2 - norms[1]
+    )
+
+    # Improvement in isolation relative to the initial state.
+    isolation_gain = (
+        isolation_dB_f1 - norms[2]
+        + isolation_dB_f2 - norms[3]
+    )
+
+    objective_value = (
+        w_trans * transmission_gain
+        + w_iso * isolation_gain
+    )
+
+    return float(objective_value), norms
 
 def Waveguide_Obj_Comp(freq, S21, S31, f, df = 0.25, norms = []):
     """
@@ -561,6 +727,244 @@ def save_progress_callback(rho_path, obj_path, pmm_instance, fpm, k, S, f, fwin,
                 os.replace(src_csv, dst_csv);  print(f"    [✓] Spectrum CSV → {dst_csv}")
         except Exception as e:
             print(f"[WARN] Spectrum plot/rename failed on call {call_idx}: {e}")
+
+    return _callback
+
+def save_demult_progress_callback(
+    rho_path,
+    obj_path,
+    pmm_instance,
+    fpm,
+    k,
+    S,
+    f1,
+    f2,
+    fwin,
+    progress_dir,
+    show_each_call=False
+):
+    """
+    Save each new six-port Bayesian demultiplexer evaluation
+    without rerunning the hardware.
+    """
+
+    last_bulbset_path = os.path.join(
+        progress_dir,
+        "last_bulbset_demult.npy"
+    )
+
+    def _callback(res):
+        # gp_minimize stores the minimized value.
+        # Negate it to recover our maximized objective.
+        new_rho = np.atleast_2d(
+            res.x_iters[-1]
+        )
+
+        new_obj = np.array(
+            [-res.func_vals[-1]],
+            dtype=float
+        )
+
+        # Append rho and objective.
+        with open(rho_path, "ab") as f_rho:
+            np.savetxt(
+                f_rho,
+                new_rho,
+                delimiter=","
+            )
+
+        with open(obj_path, "ab") as f_obj:
+            np.savetxt(
+                f_obj,
+                new_obj,
+                delimiter=","
+            )
+
+        all_objs = np.loadtxt(
+            obj_path,
+            delimiter=","
+        )
+
+        all_objs = np.atleast_1d(
+            all_objs
+        ).astype(float).ravel()
+
+        call_idx = len(all_objs)
+
+        print(
+            f"\n[Demult callback] "
+            f"Saved call {call_idx}; "
+            f"objective = {new_obj[0]:.6g}"
+        )
+
+        # Report voltage/current values and changes.
+        try:
+            bulbset_now = pmm_instance.Rho_to_Bulb(
+                new_rho[0],
+                pmm_instance.f_a(fpm),
+                knob=k,
+                scale=S
+            )
+
+            if os.path.exists(last_bulbset_path):
+                bulbset_previous = np.load(
+                    last_bulbset_path
+                )
+
+                dV = (
+                    bulbset_now[:, 0]
+                    - bulbset_previous[:, 0]
+                )
+
+                dI = (
+                    bulbset_now[:, 1]
+                    - bulbset_previous[:, 1]
+                )
+
+            else:
+                dV = np.zeros(
+                    bulbset_now.shape[0]
+                )
+
+                dI = np.zeros(
+                    bulbset_now.shape[0]
+                )
+
+            print(
+                "[BulbSet] V:",
+                bulbset_now[:, 0].tolist()
+            )
+
+            print(
+                "[BulbSet] I:",
+                bulbset_now[:, 1].tolist()
+            )
+
+            print(
+                "[BulbSet] delta V:",
+                dV.tolist()
+            )
+
+            print(
+                "[BulbSet] delta I:",
+                dI.tolist()
+            )
+
+            np.save(
+                last_bulbset_path,
+                bulbset_now
+            )
+
+        except Exception as exc:
+            print(
+                "[WARN] Could not report bulb settings:",
+                exc
+            )
+
+        # Save the objective-history plot.
+        try:
+            objective_plot_path = obj_path.replace(
+                ".csv",
+                f"_call{call_idx:03d}.pdf"
+            )
+
+            pmm_instance.Plot_Obj(
+                objective_plot_path,
+                all_objs,
+                show=False
+            )
+
+        except Exception as exc:
+            print(
+                f"[WARN] Objective plot failed "
+                f"on call {call_idx}: {exc}"
+            )
+
+        # Retrieve the spectrum measured during this objective call.
+        trace = getattr(
+            pmm_instance,
+            "_last_demult_trace_6port",
+            None
+        )
+
+        if trace is None:
+            print(
+                "[WARN] No cached six-port spectrum "
+                "was available."
+            )
+            return
+
+        try:
+            (
+                freq_GHz,
+                S21,
+                S31,
+                S41,
+                S51,
+                S61
+            ) = trace
+
+            base = os.path.join(
+                progress_dir,
+                (
+                    f"Demult_{f1:.1f}_{f2:.1f}GHz_"
+                    f"fpm_{fpm:.1f}GHz_"
+                    f"k{k:.1f}_S{S:.1f}_"
+                    f"call{call_idx:03d}"
+                )
+            )
+
+            pdf_path = base + ".pdf"
+            csv_path = base + ".csv"
+
+            pmm_instance.Trans_Plot_6Port(
+                pdf_path,
+                freq_GHz,
+                S21,
+                S31,
+                S41,
+                S51,
+                S61,
+                fpm,
+                k,
+                S,
+                f=[f1, f2],
+                f_win=fwin,
+                show=show_each_call
+            )
+
+            np.savetxt(
+                csv_path,
+                np.column_stack(
+                    [
+                        freq_GHz,
+                        S21,
+                        S31,
+                        S41,
+                        S51,
+                        S61
+                    ]
+                ),
+                delimiter=",",
+                header=(
+                    "freq_GHz,"
+                    "S21_dB,"
+                    "S31_dB,"
+                    "S41_dB,"
+                    "S51_dB,"
+                    "S61_dB"
+                ),
+                comments=""
+            )
+
+            if not show_each_call:
+                plt.close("all")
+
+        except Exception as exc:
+            print(
+                f"[WARN] Spectrum save failed "
+                f"on call {call_idx}: {exc}"
+            )
 
     return _callback
 
@@ -1799,6 +2203,381 @@ class PMMInSitu:
 
         return
 
+    def optimize_demult_bayes(
+        self,
+        n_total_calls,
+        rho,
+        fpm,
+        k,
+        S,
+        f1,
+        f2,
+        df=0.5,
+        n_initial_points=20,
+        objective="dB_6port",
+        wu=10,
+        progress_dir=".",
+        fwin=None,
+        duty_cycle=0.5,
+        show=True,
+        show_each_call=False,
+        ID="",
+        w_trans=0.25,
+        w_iso=1.0,
+        random_state=None
+    ):
+        """
+        Bayesian six-port demultiplexer optimization.
+
+        Routing:
+            f1 -> S21
+            f2 -> S31
+
+        Leakage at both target frequencies includes
+        ports 4, 5, and 6.
+        """
+
+        if fwin is None:
+            fwin = []
+
+        rho = np.asarray(
+            rho,
+            dtype=float
+        ).ravel()
+
+        os.makedirs(
+            progress_dir,
+            exist_ok=True
+        )
+
+        rho_path = os.path.join(
+            progress_dir,
+            (
+                f"rho_Demult_{f1:.1f}_{f2:.1f}GHz_"
+                f"fpm_{fpm:.1f}GHz{ID}.csv"
+            )
+        )
+
+        obj_path = os.path.join(
+            progress_dir,
+            (
+                f"obj_Demult_{f1:.1f}_{f2:.1f}GHz_"
+                f"fpm_{fpm:.1f}GHz{ID}.csv"
+            )
+        )
+
+        nrm_path = os.path.join(
+            progress_dir,
+            (
+                f"norms_Demult_{f1:.1f}_{f2:.1f}GHz_"
+                f"fpm_{fpm:.1f}GHz{ID}.csv"
+            )
+        )
+
+        x0_initial = None
+        y0_initial = None
+
+        n_calls_remaining = int(
+            n_total_calls
+        )
+
+        is_warm_start = False
+
+        # ================================================================
+        # Load previous Bayesian demultiplexer evaluations
+        # ================================================================
+
+        if (
+            os.path.isfile(rho_path)
+            and os.path.isfile(obj_path)
+        ):
+            print("=" * 80)
+            print(
+                "Found existing demultiplexer logs. "
+                "Attempting WARM START..."
+            )
+
+            loaded_rhos = np.loadtxt(
+                rho_path,
+                delimiter=","
+            )
+
+            loaded_objs = np.loadtxt(
+                obj_path,
+                delimiter=","
+            )
+
+            loaded_rhos = np.atleast_2d(
+                loaded_rhos
+            )
+
+            loaded_objs = np.atleast_1d(
+                loaded_objs
+            ).astype(float).ravel()
+
+            if (
+                loaded_rhos.shape[0]
+                != loaded_objs.shape[0]
+            ):
+                raise ValueError(
+                    "Warm-start log mismatch: "
+                    f"{loaded_rhos.shape[0]} rho rows but "
+                    f"{loaded_objs.shape[0]} objective values."
+                )
+
+            if loaded_rhos.shape[1] != rho.size:
+                raise ValueError(
+                    "Warm-start rho length is "
+                    f"{loaded_rhos.shape[1]}, but the current "
+                    f"array has {rho.size} bulbs."
+                )
+
+            x0_initial = loaded_rhos.tolist()
+
+            # gp_minimize minimizes, so stored objective values
+            # must be negated.
+            y0_initial = (
+                -loaded_objs
+            ).tolist()
+
+            is_warm_start = True
+
+            n_done = len(
+                loaded_objs
+            )
+
+            n_calls_remaining = (
+                int(n_total_calls)
+                - n_done
+            )
+
+            if n_calls_remaining <= 0:
+                print(
+                    "Optimization already completed "
+                    f"{n_done}/{n_total_calls} calls."
+                )
+
+                return None
+
+            print(
+                f"Loaded {n_done} evaluations. "
+                f"Running {n_calls_remaining} more."
+            )
+
+            print("=" * 80)
+
+        else:
+            print(
+                "No matching demultiplexer logs found. "
+                "Starting COLD START."
+            )
+
+            x0_initial = [
+                rho.tolist()
+            ]
+
+            # Callback appends to these files.
+            open(rho_path, "w").close()
+            open(obj_path, "w").close()
+
+        # ================================================================
+        # Warm up the physical array
+        # ================================================================
+
+        if wu > 0:
+            print("=" * 80)
+            print(
+                f"Running array warmup for {wu} cycles."
+            )
+            print("=" * 80)
+
+            self.Config_Warmup(
+                T=wu,
+                ballasts="New",
+                duty_cycle=duty_cycle
+            )
+
+        # ================================================================
+        # Establish or load baseline objective metrics
+        # ================================================================
+
+        if os.path.isfile(nrm_path):
+            norms = np.loadtxt(
+                nrm_path,
+                delimiter=","
+            )
+
+            norms = np.atleast_1d(
+                norms
+            ).astype(float).tolist()
+
+            print(
+                f"Loaded demultiplexer norms from {nrm_path}"
+            )
+
+        else:
+            print(
+                "No demultiplexer norms found. "
+                "Measuring the starting state..."
+            )
+
+            _, norms = self.Demult_Obj_Get_6Port(
+                rho,
+                fpm,
+                k,
+                S,
+                f1,
+                f2,
+                df=df,
+                objective=objective,
+                norms=[],
+                duty_cycle=duty_cycle,
+                w_trans=w_trans,
+                w_iso=w_iso
+            )
+
+            np.savetxt(
+                nrm_path,
+                np.asarray(norms),
+                delimiter=","
+            )
+
+            print(
+                f"Saved demultiplexer norms to {nrm_path}"
+            )
+
+        # ================================================================
+        # Function passed to gp_minimize
+        # ================================================================
+
+        def full_objective_function(
+            rho_candidate
+        ):
+            value, _ = self.Demult_Obj_Get_6Port(
+                np.asarray(
+                    rho_candidate,
+                    dtype=float
+                ),
+                fpm,
+                k,
+                S,
+                f1,
+                f2,
+                df=df,
+                objective=objective,
+                norms=norms,
+                duty_cycle=duty_cycle,
+                w_trans=w_trans,
+                w_iso=w_iso
+            )
+
+            # gp_minimize minimizes.
+            return -value
+
+        callback_handler = (
+            save_demult_progress_callback(
+                rho_path,
+                obj_path,
+                self,
+                fpm,
+                k,
+                S,
+                f1,
+                f2,
+                fwin,
+                progress_dir,
+                show_each_call=show_each_call
+            )
+        )
+
+        # ================================================================
+        # Bayesian optimization
+        # ================================================================
+
+        result = gp_minimize(
+            func=full_objective_function,
+
+            dimensions=[
+                Real(
+                    0.0,
+                    self.f_a(fpm),
+                    name=f"rho_{i}"
+                )
+                for i in range(rho.size)
+            ],
+
+            x0=x0_initial,
+            y0=y0_initial,
+
+            n_calls=n_calls_remaining,
+
+            n_initial_points=max(
+                0,
+                n_initial_points
+                - (
+                    len(x0_initial)
+                    if is_warm_start
+                    else 0
+                )
+            ),
+
+            noise="gaussian",
+            acq_func="EI",
+            callback=callback_handler,
+            random_state=random_state
+        )
+
+        # ================================================================
+        # Find and measure the best result
+        # ================================================================
+
+        all_rhos_tested = np.asarray(
+            result.x_iters
+        )
+
+        all_objs_achieved = -np.asarray(
+            result.func_vals
+        )
+
+        best_idx = int(
+            np.argmax(all_objs_achieved)
+        )
+
+        best_rho = all_rhos_tested[
+            best_idx
+        ]
+
+        best_obj = all_objs_achieved[
+            best_idx
+        ]
+
+        print(
+            "\nOptimization complete. "
+            f"Best objective: {best_obj:.6g}"
+        )
+
+        self.Demult_Run_And_Plot_6Port(
+            progress_dir,
+            best_rho,
+            fpm,
+            k,
+            S,
+            f1,
+            f2,
+            fwin=fwin,
+            show=show
+        )
+
+        self.Plot_Obj(
+            obj_path.replace(
+                ".csv",
+                ".pdf"
+            ),
+            all_objs_achieved,
+            show=show
+        )
+
+        return result
 
     def Demult_Obj_Get(self, rho, fpm, k, S, f1, f2, df = 0.25,\
                             objective = 'comp', norms = [], duty_cycle = 0.5):
@@ -1823,6 +2602,108 @@ class PMMInSitu:
         else:
             raise RuntimeError("That objective has not been implemented")
 
+        def Demult_Obj_Get_6Port(
+        self,
+        rho,
+        fpm,
+        k,
+        S,
+        f1,
+        f2,
+        df=0.25,
+        objective="dB_6port",
+        norms=None,
+        duty_cycle=0.5,
+        w_trans=0.25,
+        w_iso=1.0
+    ):
+            """
+            Apply one rho candidate, measure all five output ports,
+            and calculate the six-port demultiplexer objective.
+            """
+
+            if norms is None:
+                norms = []
+
+            if duty_cycle <= 0:
+                raise ValueError(
+                    "duty_cycle must be greater than zero."
+                )
+
+            try:
+                # Apply this candidate to the bulb array.
+                self.ArraySet_Rho(
+                    rho,
+                    self.f_a(fpm),
+                    knob=k,
+                    scale=S
+                )
+
+                time.sleep(1)
+
+                # Measure all five output ports.
+                (
+                    freq,
+                    S21,
+                    S31,
+                    S41,
+                    S51,
+                    S61
+                ) = self.Get_S21_S31_S41_S51_S61()
+
+            finally:
+                # Always turn the array off, even if the VNA read fails.
+                try:
+                    self.Deactivate_Bulb("all")
+                    time.sleep(1)
+                    self.Deactivate_Bulb("all")
+
+                finally:
+                    # Prevent a negative sleep value.
+                    off_time = max(
+                        0.0,
+                        18 / duty_cycle - 20
+                    )
+
+                    time.sleep(off_time)
+
+            freq_GHz = freq / 1e9
+
+            # Save the most recently measured spectrum in memory.
+            # The callback will use this without running the hardware again.
+            self._last_demult_trace_6port = (
+                freq_GHz.copy(),
+                S21.copy(),
+                S31.copy(),
+                S41.copy(),
+                S51.copy(),
+                S61.copy()
+            )
+
+            if objective in (
+                "dB_6port",
+                "6port_dB",
+                "6port"
+            ):
+                return Demult_Obj_dB_6Port(
+                    freq_GHz,
+                    S21,
+                    S31,
+                    S41,
+                    S51,
+                    S61,
+                    f1,
+                    f2,
+                    df=df,
+                    norms=norms,
+                    w_trans=w_trans,
+                    w_iso=w_iso
+                )
+
+            raise RuntimeError(
+                "Use objective='dB_6port' for "
+                "six-port Bayesian demultiplexing."
+            )
 
     def Demult_Run_And_Plot(self, save_dir, rho, fpm, k, S, f1, f2,\
                                    fwin = [], show = True):
@@ -1846,6 +2727,108 @@ class PMMInSitu:
 
         return
 
+        def Demult_Run_And_Plot_6Port(
+        self,
+        save_dir,
+        rho,
+        fpm,
+        k,
+        S,
+        f1,
+        f2,
+        fwin=None,
+        show=True
+    ):
+            """
+            Apply rho, measure all five output ports,
+            and save a six-port demultiplexer PDF and CSV.
+            """
+
+            if fwin is None:
+                fwin = []
+
+            try:
+                self.ArraySet_Rho(
+                    rho,
+                    self.f_a(fpm),
+                    knob=k,
+                    scale=S
+                )
+
+                time.sleep(1)
+
+                (
+                    freq,
+                    S21,
+                    S31,
+                    S41,
+                    S51,
+                    S61
+                ) = self.Get_S21_S31_S41_S51_S61()
+
+            finally:
+                self.Deactivate_Bulb("all")
+                time.sleep(1)
+                self.Deactivate_Bulb("all")
+
+            os.makedirs(
+                save_dir,
+                exist_ok=True
+            )
+
+            base = os.path.join(
+                save_dir,
+                (
+                    f"Demult_{f1:.1f}_{f2:.1f}GHz_"
+                    f"fpm_{fpm:.1f}GHz_"
+                    f"k{k:.1f}_S{S:.1f}"
+                )
+            )
+
+            pdf_path = base + ".pdf"
+            csv_path = base + ".csv"
+
+            self.Trans_Plot_6Port(
+                pdf_path,
+                freq / 1e9,
+                S21,
+                S31,
+                S41,
+                S51,
+                S61,
+                fpm,
+                k,
+                S,
+                f=[f1, f2],
+                f_win=fwin,
+                show=show
+            )
+
+            np.savetxt(
+                csv_path,
+                np.column_stack(
+                    [
+                        freq / 1e9,
+                        S21,
+                        S31,
+                        S41,
+                        S51,
+                        S61
+                    ]
+                ),
+                delimiter=",",
+                header=(
+                    "freq_GHz,"
+                    "S21_dB,"
+                    "S31_dB,"
+                    "S41_dB,"
+                    "S51_dB,"
+                    "S61_dB"
+                ),
+                comments=""
+            )
+
+            return pdf_path, csv_path
 
     def optimize_waveguide_stochastic(self, epochs, rho, fpm, k, S, f, df = 0.5,\
                                alpha = 0.001, sample = 12, p = 0.01,\
@@ -2419,6 +3402,8 @@ class PMMInSitu:
 
         return
     
+    
+    
     def Wvg_Obj_Get(self, rho, fpm, k, S, f, df = 0.25,\
                     objective = 'comp', norms = [], duty_cycle = 0.5):
         """
@@ -2452,33 +3437,81 @@ class PMMInSitu:
         else:
             raise RuntimeError("That objective has not been implemented")
 
-
-    def Wvg_Run_And_Plot(self, save_dir, rho, fpm, k, S, f,\
-                                   fwin = [], show = True):
+    def Trans_Plot_6Port(self, savepath, freq, S21, S31, S41, S51, S61,
+                     fpm, k, S, f=[], f_win=[], show=True):
         """
-        Run array and plot transmission spectrumn.
-
-        Args:
-            See args for optimize_waveguide_stochastic() and Trans_Plot_2Port()
+        Creates plot of transmission spectrum for 6-port measurement.
         """
-        self.ArraySet_Rho(rho, self.f_a(fpm), knob = k, scale = S)
+        fig, ax = plt.subplots(1, 1, figsize=(9, 6))
+
+        ax.set_xlabel('Frequency (GHz)', fontsize=30)
+        ax.set_ylabel('Transmission (dB)', fontsize=30)
+
+        for i in range(10):
+            ax.axhline(y=-10*(i+1), color='grey',
+                    label='_nolegend_', linewidth=1)
+
+        ax.set_title('k = %.1f, S = %.1f, $f_{p,max}$ = %.1f GHz' % (k, S, fpm),
+                    fontsize=30)
+
+        ax.tick_params(labelsize=27)
+
+        ax.plot(freq, S21, linewidth=5, label='$S_{21}$')
+        ax.plot(freq, S31, linewidth=3, label='$S_{31}$')
+        ax.plot(freq, S41, linewidth=3, label='$S_{41}$')
+        ax.plot(freq, S51, linewidth=3, label='$S_{51}$')
+        ax.plot(freq, S61, linewidth=3, label='$S_{61}$')
+
+        for freq_i in f:
+            ax.axvline(x=freq_i, color='k', linestyle='--')
+
+        if len(f_win) > 0:
+            ax.set_xlim(f_win)
+
+        ax.set_ylim([-80, -10])
+        ax.legend(bbox_to_anchor=[1.25, 0.5], loc='center', ncol=1, fontsize=20)
+
+        plt.savefig(savepath, dpi=1500, bbox_inches='tight')
+
+        if show:
+            plt.show()
+
+        return
+
+    def Wvg_Run_And_Plot(self, save_dir, rho, fpm, k, S, f,
+                     fwin=[], show=True):
+        """
+        Run array and plot/save 6-port transmission spectrum.
+        """
+        self.ArraySet_Rho(rho, self.f_a(fpm), knob=k, scale=S)
         time.sleep(1)
+
         freq, S21, S31, S41, S51, S61 = self.Get_S21_S31_S41_S51_S61()
+
         self.Deactivate_Bulb('all')
         time.sleep(1)
         self.Deactivate_Bulb('all')
 
-        savepath = save_dir+'/Wvg_%.1fGHz_fpm_%.1fGHz_k%.1f_S%.1f.pdf'\
-                        %(f,fpm,k,S)
-        self.Trans_Plot_2Port(savepath, freq/10**9, S21, S31, fpm, k, S,\
-                              f = [f], f_win = fwin, show = show)
-        
+        savepath = save_dir + '/Wvg_%.1fGHz_fpm_%.1fGHz_k%.1f_S%.1f.pdf' % (f, fpm, k, S)
+
+        self.Trans_Plot_6Port(
+            savepath,
+            freq/1e9,
+            S21, S31, S41, S51, S61,
+            fpm, k, S,
+            f=[f],
+            f_win=fwin,
+            show=show
+        )
+
         csvpath = savepath.replace('.pdf', '.csv')
-        np.savetxt(csvpath,
+        np.savetxt(
+            csvpath,
             np.column_stack([freq/1e9, S21, S31, S41, S51, S61]),
             delimiter=',',
             header='freq_GHz,S21_dB,S31_dB,S41_dB,S51_dB,S61_dB',
-            comments='')
+            comments=''
+        )
 
         return
 
