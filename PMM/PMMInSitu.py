@@ -2602,7 +2602,7 @@ class PMMInSitu:
         else:
             raise RuntimeError("That objective has not been implemented")
 
-        def Demult_Obj_Get_6Port(
+    def Demult_Obj_Get_6Port(
         self,
         rho,
         fpm,
@@ -2727,7 +2727,7 @@ class PMMInSitu:
 
         return
 
-        def Demult_Run_And_Plot_6Port(
+    def Demult_Run_And_Plot_6Port(
         self,
         save_dir,
         rho,
