@@ -158,29 +158,47 @@ def Demult_Obj_dB(freq, S21, S31, f1, f2, df = 0.25, norms = []):
         i_2 = isolation_2/new_norms[3]
         return c_1*c_2 + 10*i_1 + 10*i_2, new_norms
 
-def Demult_Obj_dB_6Port(freq, S21, S31, S41, S51, S61, f1, f2, df=0.25, norms=None, w_trans=0.25, w_iso=1.0):
+def _coerce_sparam_label(label):
     """
-    Six-port demultiplexer objective.
+    Normalize a port label into the form S21, S31, S41, S51, or S61.
+    Accepts labels like "S21", "21", or 21.
+    """
+    if isinstance(label, int):
+        label = f"S{label}"
 
-    Target routing:
-        f1 -> S21
-        f2 -> S31
+    label = str(label).strip().upper()
 
-    At f1:
-        desired port = S21
-        undesired ports = S31, S41, S51, S61
+    if not label.startswith("S"):
+        label = "S" + label
 
-    At f2:
-        desired port = S31
-        undesired ports = S21, S41, S51, S61
+    valid = {"S21", "S31", "S41", "S51", "S61"}
 
-    norms stores the four starting-state metrics:
-        norms[0] = S21 transmission near f1
-        norms[1] = S31 transmission near f2
-        norms[2] = isolation near f1
-        norms[3] = isolation near f2
+    if label not in valid:
+        raise ValueError(
+            f"Unknown S-parameter label {label!r}. "
+            f"Valid labels are {sorted(valid)}."
+        )
 
-    Larger objective values are better.
+    return label
+
+
+def Demult_Obj_dB_Flexible(
+    freq,
+    traces,
+    targets,
+    df=0.25,
+    norms=None,
+    w_trans=0.25,
+    w_iso=1.0,
+    wrong_port_weights=None
+):
+    """
+    Flexible multi-port dB demultiplexer objective.
+
+    targets example:
+        [(4.0, "S21"), (6.0, "S31")]
+
+    wrong_port_weights controls how strongly each wrong port is penalized.
     """
 
     if norms is None:
@@ -188,134 +206,143 @@ def Demult_Obj_dB_6Port(freq, S21, S31, S41, S51, S61, f1, f2, df=0.25, norms=No
 
     freq = np.asarray(freq, dtype=float)
 
-    S21 = np.asarray(S21, dtype=float)
-    S31 = np.asarray(S31, dtype=float)
-    S41 = np.asarray(S41, dtype=float)
-    S51 = np.asarray(S51, dtype=float)
-    S61 = np.asarray(S61, dtype=float)
+    port_labels = ["S21", "S31", "S41", "S51", "S61"]
 
-    traces = [S21, S31, S41, S51, S61]
+    clean_traces = {}
+    for port, trace in traces.items():
+        clean_port = _coerce_sparam_label(port)
+        clean_traces[clean_port] = np.asarray(trace, dtype=float)
 
-    if any(trace.shape != freq.shape for trace in traces):
+    missing = [
+        port
+        for port in port_labels
+        if port not in clean_traces
+    ]
+
+    if missing:
         raise ValueError(
-            "All six-port traces must have the same shape as freq."
+            f"Missing traces for ports: {missing}"
         )
 
-    # Frequency-window indices
-    i1_l = np.searchsorted(
-        freq,
-        f1 - df / 2,
-        side="left"
-    )
-    i1_r = np.searchsorted(
-        freq,
-        f1 + df / 2,
-        side="right"
-    )
-
-    i2_l = np.searchsorted(
-        freq,
-        f2 - df / 2,
-        side="left"
-    )
-    i2_r = np.searchsorted(
-        freq,
-        f2 + df / 2,
-        side="right"
-    )
-
-    if i1_l >= i1_r:
+    if any(clean_traces[port].shape != freq.shape for port in port_labels):
         raise ValueError(
-            f"No VNA points were found near f1 = {f1} GHz."
+            "All traces must have the same shape as freq."
         )
 
-    if i2_l >= i2_r:
+    if wrong_port_weights is None:
+        wrong_port_weights = {
+            port: 1.0
+            for port in port_labels
+        }
+    else:
+        wrong_port_weights = {
+            _coerce_sparam_label(port): float(weight)
+            for port, weight in wrong_port_weights.items()
+        }
+
+        for port in port_labels:
+            wrong_port_weights.setdefault(port, 1.0)
+
+    clean_targets = [
+        (float(target_freq), _coerce_sparam_label(target_port))
+        for target_freq, target_port in targets
+    ]
+
+    if len(clean_targets) == 0:
         raise ValueError(
-            f"No VNA points were found near f2 = {f2} GHz."
+            "targets must contain at least one (frequency, port) pair."
         )
 
-    # Convert dB transmission into linear power ratios.
-    T21 = 10.0**(S21 / 10.0)
-    T31 = 10.0**(S31 / 10.0)
-    T41 = 10.0**(S41 / 10.0)
-    T51 = 10.0**(S51 / 10.0)
-    T61 = 10.0**(S61 / 10.0)
+    T = {
+        port: 10.0**(clean_traces[port] / 10.0)
+        for port in port_labels
+    }
 
-    # At f1, everything except S21 is leakage.
-    bad_power_f1 = (
-        T31
-        + T41
-        + T51
-        + T61
-    )
+    correct_metrics = []
+    isolation_metrics = []
 
-    # At f2, everything except S31 is leakage.
-    bad_power_f2 = (
-        T21
-        + T41
-        + T51
-        + T61
-    )
-
-    # Convert the combined leakage powers back to dB.
-    bad_dB_f1 = 10.0 * np.log10(
-        bad_power_f1 + 1e-300
-    )
-
-    bad_dB_f2 = 10.0 * np.log10(
-        bad_power_f2 + 1e-300
-    )
-
-    # Desired absolute transmission.
-    correct_dB_f1 = float(
-        np.mean(S21[i1_l:i1_r])
-    )
-
-    correct_dB_f2 = float(
-        np.mean(S31[i2_l:i2_r])
-    )
-
-    # Desired-port transmission minus all leakage.
-    isolation_dB_f1 = float(
-        np.mean(
-            S21[i1_l:i1_r]
-            - bad_dB_f1[i1_l:i1_r]
+    for target_freq, desired_port in clean_targets:
+        i_l = np.searchsorted(
+            freq,
+            target_freq - df / 2,
+            side="left"
         )
-    )
 
-    isolation_dB_f2 = float(
-        np.mean(
-            S31[i2_l:i2_r]
-            - bad_dB_f2[i2_l:i2_r]
+        i_r = np.searchsorted(
+            freq,
+            target_freq + df / 2,
+            side="right"
         )
+
+        if i_l >= i_r:
+            raise ValueError(
+                f"No VNA points were found near {target_freq} GHz."
+            )
+
+        correct_dB = float(
+            np.mean(clean_traces[desired_port][i_l:i_r])
+        )
+
+        bad_power = np.zeros_like(
+            freq,
+            dtype=float
+        )
+
+        for port in port_labels:
+            if port == desired_port:
+                continue
+
+            weight = float(
+                wrong_port_weights.get(port, 1.0)
+            )
+
+            if weight == 0.0:
+                continue
+
+            bad_power = bad_power + weight * T[port]
+
+        if np.all(bad_power == 0.0):
+            isolation_dB = 0.0
+        else:
+            bad_dB = 10.0 * np.log10(
+                bad_power + 1e-300
+            )
+
+            isolation_dB = float(
+                np.mean(
+                    clean_traces[desired_port][i_l:i_r]
+                    - bad_dB[i_l:i_r]
+                )
+            )
+
+        correct_metrics.append(correct_dB)
+        isolation_metrics.append(isolation_dB)
+
+    current_metrics = (
+        correct_metrics
+        + isolation_metrics
     )
 
-    # First measurement establishes the baseline.
     if len(norms) == 0:
-        new_norms = [
-            correct_dB_f1,
-            correct_dB_f2,
-            isolation_dB_f1,
-            isolation_dB_f2
-        ]
+        return 0.0, current_metrics
 
-        return 0.0, new_norms
-
-    if len(norms) != 4:
+    if len(norms) != len(current_metrics):
         raise ValueError(
-            "Demult_Obj_dB_6Port expects four baseline metrics."
+            "Norms length does not match the current demux target setup. "
+            "If you changed target_ports or wrong_port_weights, use a new ID "
+            "so the run creates fresh norms."
         )
 
-    # Improvement in desired transmission relative to the initial state.
-    transmission_gain = (
-        correct_dB_f1 - norms[0]
-        + correct_dB_f2 - norms[1]
+    n_targets = len(clean_targets)
+
+    transmission_gain = sum(
+        current_metrics[i] - norms[i]
+        for i in range(n_targets)
     )
 
-    # Improvement in isolation relative to the initial state.
-    isolation_gain = (
-        isolation_dB_f1 - norms[2]
-        + isolation_dB_f2 - norms[3]
+    isolation_gain = sum(
+        current_metrics[n_targets + i] - norms[n_targets + i]
+        for i in range(n_targets)
     )
 
     objective_value = (
@@ -324,6 +351,66 @@ def Demult_Obj_dB_6Port(freq, S21, S31, S41, S51, S61, f1, f2, df=0.25, norms=No
     )
 
     return float(objective_value), norms
+
+
+def Demult_Obj_dB_6Port(
+    freq,
+    S21,
+    S31,
+    S41,
+    S51,
+    S61,
+    f1,
+    f2,
+    df=0.25,
+    norms=None,
+    w_trans=0.25,
+    w_iso=1.0,
+    target_ports=None,
+    wrong_port_weights=None
+):
+    """
+    Backward-compatible six-port demultiplexer objective.
+
+    Default behavior:
+        f1 -> S21
+        f2 -> S31
+        all wrong ports are penalized equally
+    """
+
+    if target_ports is None:
+        target_ports = ["S21", "S31"]
+
+    if len(target_ports) != 2:
+        raise ValueError(
+            "Demult_Obj_dB_6Port expects exactly two target ports, "
+            "one for f1 and one for f2."
+        )
+
+    traces = {
+        "S21": S21,
+        "S31": S31,
+        "S41": S41,
+        "S51": S51,
+        "S61": S61
+    }
+
+    targets = [
+        (f1, target_ports[0]),
+        (f2, target_ports[1])
+    ]
+
+    return Demult_Obj_dB_Flexible(
+        freq,
+        traces,
+        targets,
+        df=df,
+        norms=norms,
+        w_trans=w_trans,
+        w_iso=w_iso,
+        wrong_port_weights=wrong_port_weights
+    )
+
 
 def Waveguide_Obj_Comp(freq, S21, S31, f, df = 0.25, norms = []):
     """
@@ -741,7 +828,8 @@ def save_demult_progress_callback(
     f2,
     fwin,
     progress_dir,
-    show_each_call=False
+    show_each_call=False,
+    plot_ports=None
 ):
     """
     Save each new six-port Bayesian demultiplexer evaluation
@@ -930,7 +1018,8 @@ def save_demult_progress_callback(
                 S,
                 f=[f1, f2],
                 f_win=fwin,
-                show=show_each_call
+                show=show_each_call,
+                plot_ports=plot_ports
             )
 
             np.savetxt(
@@ -2224,6 +2313,9 @@ class PMMInSitu:
         ID="",
         w_trans=0.25,
         w_iso=1.0,
+        target_ports=None,
+        wrong_port_weights=None,
+        plot_ports=None,
         random_state=None
     ):
         """
@@ -2239,6 +2331,9 @@ class PMMInSitu:
 
         if fwin is None:
             fwin = []
+
+        if target_ports is None:
+            target_ports = ["S21", "S31"]
 
         rho = np.asarray(
             rho,
@@ -2433,7 +2528,9 @@ class PMMInSitu:
                 norms=[],
                 duty_cycle=duty_cycle,
                 w_trans=w_trans,
-                w_iso=w_iso
+                w_iso=w_iso,
+                target_ports=target_ports,
+                wrong_port_weights=wrong_port_weights
             )
 
             np.savetxt(
@@ -2468,7 +2565,9 @@ class PMMInSitu:
                 norms=norms,
                 duty_cycle=duty_cycle,
                 w_trans=w_trans,
-                w_iso=w_iso
+                w_iso=w_iso,
+                target_ports=target_ports,
+                wrong_port_weights=wrong_port_weights
             )
 
             # gp_minimize minimizes.
@@ -2486,7 +2585,8 @@ class PMMInSitu:
                 f2,
                 fwin,
                 progress_dir,
-                show_each_call=show_each_call
+                show_each_call=show_each_call,
+                plot_ports=plot_ports
             )
         )
 
@@ -2565,7 +2665,8 @@ class PMMInSitu:
             f1,
             f2,
             fwin=fwin,
-            show=show
+            show=show,
+            plot_ports=plot_ports
         )
 
         self.Plot_Obj(
@@ -2615,7 +2716,9 @@ class PMMInSitu:
         norms=None,
         duty_cycle=0.5,
         w_trans=0.25,
-        w_iso=1.0
+        w_iso=1.0,
+        target_ports=None,
+        wrong_port_weights=None
     ):
             """
             Apply one rho candidate, measure all five output ports,
@@ -2624,6 +2727,9 @@ class PMMInSitu:
 
             if norms is None:
                 norms = []
+
+            if target_ports is None:
+                target_ports = ["S21", "S31"]
 
             if duty_cycle <= 0:
                 raise ValueError(
@@ -2697,7 +2803,9 @@ class PMMInSitu:
                     df=df,
                     norms=norms,
                     w_trans=w_trans,
-                    w_iso=w_iso
+                    w_iso=w_iso,
+                    target_ports=target_ports,
+                    wrong_port_weights=wrong_port_weights
                 )
 
             raise RuntimeError(
@@ -2737,7 +2845,8 @@ class PMMInSitu:
         f1,
         f2,
         fwin=None,
-        show=True
+        show=True,
+        plot_ports=None
     ):
             """
             Apply rho, measure all five output ports,
@@ -2801,7 +2910,8 @@ class PMMInSitu:
                 S,
                 f=[f1, f2],
                 f_win=fwin,
-                show=show
+                show=show,
+                plot_ports=plot_ports
             )
 
             np.savetxt(
@@ -3438,10 +3548,26 @@ class PMMInSitu:
             raise RuntimeError("That objective has not been implemented")
 
     def Trans_Plot_6Port(self, savepath, freq, S21, S31, S41, S51, S61,
-                     fpm, k, S, f=[], f_win=[], show=True):
+                     fpm, k, S, f=[], f_win=[], show=True, plot_ports=None):
         """
         Creates plot of transmission spectrum for 6-port measurement.
         """
+        traces = {
+            "S21": S21,
+            "S31": S31,
+            "S41": S41,
+            "S51": S51,
+            "S61": S61
+        }
+
+        if plot_ports is None:
+            plot_ports = ["S21", "S31", "S41", "S51", "S61"]
+        else:
+            plot_ports = [
+                _coerce_sparam_label(port)
+                for port in plot_ports
+            ]
+
         fig, ax = plt.subplots(1, 1, figsize=(9, 6))
 
         ax.set_xlabel('Frequency (GHz)', fontsize=30)
@@ -3456,11 +3582,21 @@ class PMMInSitu:
 
         ax.tick_params(labelsize=27)
 
-        ax.plot(freq, S21, linewidth=5, label='$S_{21}$')
-        ax.plot(freq, S31, linewidth=3, label='$S_{31}$')
-        ax.plot(freq, S41, linewidth=3, label='$S_{41}$')
-        ax.plot(freq, S51, linewidth=3, label='$S_{51}$')
-        ax.plot(freq, S61, linewidth=3, label='$S_{61}$')
+        line_widths = {
+            "S21": 3,
+            "S31": 3,
+            "S41": 3,
+            "S51": 3,
+            "S61": 3
+        }
+
+        for port in plot_ports:
+            ax.plot(
+                freq,
+                traces[port],
+                linewidth=line_widths.get(port, 3),
+                label=f'${port[0]}_{{{port[1:]}}}$'
+            )
 
         for freq_i in f:
             ax.axvline(x=freq_i, color='k', linestyle='--')
