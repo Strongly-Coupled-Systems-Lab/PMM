@@ -829,7 +829,15 @@ def save_demult_progress_callback(
     fwin,
     progress_dir,
     show_each_call=False,
-    plot_ports=None
+    plot_ports=None,
+
+    active_health_every=None,
+    active_health_log_path=None,
+    active_health_plot_path=None,
+    active_health_V=20.0,
+    active_health_I=3.0,
+    active_health_warmup=5.0,
+    active_health_cooldown=3.0
 ):
     """
     Save each new six-port Bayesian demultiplexer evaluation
@@ -1055,6 +1063,52 @@ def save_demult_progress_callback(
                 f"on call {call_idx}: {exc}"
             )
 
+        if (
+            active_health_every is not None
+            and active_health_every > 0
+            and call_idx % active_health_every == 0
+        ):
+            health_path = (
+                active_health_log_path
+                or os.path.join(
+                    progress_dir,
+                    "active_health_diagnostic.csv"
+                )
+            )
+
+            plot_path = (
+                active_health_plot_path
+                or health_path.replace(
+                    ".csv",
+                    ".pdf"
+                )
+            )
+
+            try:
+                pmm_instance.Run_Array_Health_Diagnostic(
+                    save_path=health_path,
+                    call_idx=call_idx,
+                    V_diag=active_health_V,
+                    I_diag=active_health_I,
+                    warmup=active_health_warmup,
+                    cooldown=active_health_cooldown,
+                    ideal_W=40.0,
+                    low_W=30.0,
+                    high_W=50.0
+                )
+
+                pmm_instance.Plot_Health_History(
+                    health_csv_path=health_path,
+                    save_path=plot_path,
+                    show=False
+                )
+
+            except Exception as exc:
+                print(
+                    f"[WARN] Active health diagnostic failed "
+                    f"at call {call_idx}: {exc}"
+                )
+
     return _callback
 
 
@@ -1182,7 +1236,17 @@ class PMMInSitu:
 
             # Create bulb entries in dict
             for bulb_addr in self.config['serial_ports'][port]:
-                self.bulbs[bulb_addr] = {'I': 0.0, 'V': 0.0,\
+                self.bulbs[bulb_addr] = {'I': 0.0, 'V': 0.0,
+
+                                    # Latest power-supply readback / health info
+                                    'V_read': np.nan,
+                                    'I_read': np.nan,
+                                    'P_power_supply': np.nan,
+                                    'health': np.nan,
+                                    'health_status': 'unknown',
+                                    'health_error_W': np.nan,
+                                    'health_updated_time': np.nan,
+
                                     'Inst': minimalmodbus.Instrument(\
                                     port = port, slaveaddress = bulb_addr,\
                                     mode = minimalmodbus.MODE_RTU)}
@@ -1392,6 +1456,548 @@ class PMMInSitu:
                     value = I*100, functioncode = 6)
         return
     
+    def _score_power_health(
+        self,
+        P,
+        is_on=True,
+        ideal_W=40.0,
+        low_W=30.0,
+        high_W=50.0
+    ):
+        """
+        Convert power draw into a health status.
+
+        healthy:
+            low_W <= P <= high_W
+
+        health:
+            100% means inside the healthy power band.
+            Outside the band, score decreases with distance.
+        """
+
+        if not is_on:
+            return 0.0, "off"
+
+        if not np.isfinite(P):
+            return np.nan, "read_error"
+
+        if P <= 1.0:
+            return 0.0, "near_zero_power"
+
+        if low_W <= P <= high_W:
+            return 100.0, "healthy"
+
+        if P < low_W:
+            health = 100.0 * P / low_W
+            return max(0.0, health), "low_power"
+
+        # P > high_W
+        health = 100.0 * max(0.0, 1.0 - (P - high_W) / high_W)
+        return health, "high_power"
+
+
+    
+    def Read_Bulb_Health(
+        self,
+        addr,
+        ideal_W=40.0,
+        low_W=30.0,
+        high_W=50.0
+    ):
+        """
+        Read one bulb's power-supply monitor V/I and update its health fields.
+
+        Readback registers:
+            0x1002 -> actual/display voltage * 100
+            0x1003 -> actual/display current * 100
+
+        Status register:
+            0x1004 -> output ON/OFF status
+        """
+
+        import time
+        import numpy as np
+
+        inst = self.bulbs[addr]["Inst"]
+
+        def read_register_retry(register, tries=5, delay=0.4):
+            last_exc = None
+
+            for attempt in range(tries):
+                try:
+                    return inst.read_register(register)
+                except Exception as exc:
+                    last_exc = exc
+                    time.sleep(delay)
+
+            raise last_exc
+
+        V_read = read_register_retry(0x1002) / 100.0
+        time.sleep(0.1)
+
+        I_read = read_register_retry(0x1003) / 100.0
+        time.sleep(0.1)
+
+        try:
+            status_raw = read_register_retry(0x1004)
+            is_on = bool(status_raw & 0x0001)
+        except Exception:
+            status_raw = np.nan
+
+            # Fallback: if it is drawing real current/voltage, treat it as on.
+            is_on = bool(V_read > 1.0 and I_read > 0.05)
+
+        if is_on:
+            P = V_read * I_read
+        else:
+            P = 0.0
+
+        health, health_status = self._score_power_health(
+            P,
+            is_on=is_on,
+            ideal_W=ideal_W,
+            low_W=low_W,
+            high_W=high_W
+        )
+
+        health_error_W = P - ideal_W
+
+        self.bulbs[addr]["V_read"] = V_read
+        self.bulbs[addr]["I_read"] = I_read
+        self.bulbs[addr]["P_power_supply"] = P
+        self.bulbs[addr]["health"] = health
+        self.bulbs[addr]["health_status"] = health_status
+        self.bulbs[addr]["health_error_W"] = health_error_W
+        self.bulbs[addr]["health_updated_time"] = time.time()
+
+        return {
+            "addr": addr,
+            "V_read": V_read,
+            "I_read": I_read,
+            "P_power_supply": P,
+            "health": health,
+            "health_status": health_status,
+            "health_error_W": health_error_W,
+            "status_raw": status_raw,
+            "is_on": is_on
+        }
+
+    def Check_Array_Health(
+        self,
+        save_path=None,
+        tag="",
+        ideal_W=40.0,
+        low_W=30.0,
+        high_W=50.0
+    ):
+        """
+        Read health for all bulbs.
+
+        Runs in parallel across RS-485 buses, but serially within each bus.
+        This avoids multiple simultaneous commands on the same RS-485 bus.
+        """
+
+        import csv
+        import os
+        import time
+        import threading
+
+        rows = []
+        lock = threading.Lock()
+        timestamp = time.time()
+
+        def process_bus(addr_list):
+            local_rows = []
+
+            for addr in addr_list:
+                try:
+                    rec = self.Read_Bulb_Health(
+                        addr,
+                        ideal_W=ideal_W,
+                        low_W=low_W,
+                        high_W=high_W
+                    )
+
+                except Exception as exc:
+                    rec = {
+                        "addr": addr,
+                        "V_read": np.nan,
+                        "I_read": np.nan,
+                        "P_power_supply": np.nan,
+                        "health": np.nan,
+                        "health_status": "read_error",
+                        "health_error_W": np.nan,
+                        "status_raw": np.nan,
+                        "is_on": False,
+                        "error": str(exc)
+                    }
+
+                    self.bulbs[addr]["health_status"] = "read_error"
+                    self.bulbs[addr]["health"] = np.nan
+
+                rec["timestamp"] = timestamp
+                rec["tag"] = tag
+
+                if "error" not in rec:
+                    rec["error"] = ""
+
+                local_rows.append(rec)
+
+            with lock:
+                rows.extend(local_rows)
+
+        threads = []
+
+        for port, addr_list in self.config["serial_ports"].items():
+            t = threading.Thread(
+                target=process_bus,
+                args=(addr_list,)
+            )
+            t.start()
+            threads.append(t)
+
+        for t in threads:
+            t.join()
+
+        rows = sorted(
+            rows,
+            key=lambda r: r["addr"]
+        )
+
+        if save_path is not None:
+            file_exists = os.path.isfile(save_path)
+
+            fieldnames = [
+                "timestamp",
+                "tag",
+                "addr",
+                "V_read",
+                "I_read",
+                "P_power_supply",
+                "health",
+                "health_status",
+                "health_error_W",
+                "status_raw",
+                "is_on",
+                "error"
+            ]
+
+            with open(save_path, "a", newline="") as f:
+                writer = csv.DictWriter(
+                    f,
+                    fieldnames=fieldnames
+                )
+
+                if not file_exists:
+                    writer.writeheader()
+
+                writer.writerows(rows)
+
+        return rows
+
+    
+    def Run_Array_Health_Diagnostic(
+        self,
+        save_path,
+        call_idx=None,
+        V_diag=20.0,
+        I_diag=3.0,
+        warmup=5.0,
+        cooldown=3.0,
+        ideal_W=40.0,
+        low_W=30.0,
+        high_W=50.0
+    ):
+        """
+        Active bulb-health diagnostic.
+
+        Temporarily sets the full array to a diagnostic condition,
+        reads power-supply V/I/P health, saves it, then turns the array off.
+        """
+
+        import time
+
+        if call_idx is None:
+            tag = f"active_health_V{V_diag:g}_I{I_diag:g}"
+        else:
+            tag = f"active_health_call_{call_idx}_V{V_diag:g}_I{I_diag:g}"
+
+        rows = []
+
+        try:
+            print("=" * 80)
+            print(
+                f"[Active health diagnostic] "
+                f"Setting all bulbs to {V_diag:g} V, {I_diag:g} A"
+            )
+            print(f"[Active health diagnostic] tag = {tag}")
+            print("=" * 80)
+
+            self.Set_Bulb_VI(
+                "all",
+                V_diag,
+                I_diag,
+                verbose=False
+            )
+
+            time.sleep(0.1)
+
+            self.Activate_Bulb("all")
+
+            time.sleep(warmup)
+
+            rows = self.Check_Array_Health(
+                save_path=save_path,
+                tag=tag,
+                ideal_W=ideal_W,
+                low_W=low_W,
+                high_W=high_W
+            )
+
+            bad_rows = [
+                row for row in rows
+                if row["health_status"] != "healthy"
+            ]
+
+            print(
+                f"[Active health diagnostic] "
+                f"{len(rows) - len(bad_rows)}/{len(rows)} bulbs healthy"
+            )
+
+            if bad_rows:
+                print("[Active health diagnostic] Non-healthy bulbs:")
+                for row in bad_rows:
+                    print(
+                        f"  addr={row['addr']}, "
+                        f"P={row['P_power_supply']:.2f} W, "
+                        f"health={row['health']:.1f}%, "
+                        f"status={row['health_status']}"
+                    )
+
+        finally:
+            try:
+                self.Deactivate_Bulb("all")
+                time.sleep(1)
+                self.Deactivate_Bulb("all")
+            except Exception as exc:
+                print(
+                    "[WARN] Failed to deactivate array after "
+                    f"health diagnostic: {exc}"
+                )
+
+            if cooldown > 0:
+                time.sleep(cooldown)
+
+        return rows
+
+
+    def Plot_Health_History(
+        self,
+        health_csv_path,
+        save_path=None,
+        show=False
+    ):
+        """
+        Plot active health diagnostics over optimizer call number.
+
+        Rows = bulb address
+        Columns = diagnostic call number
+        Color = health percentage
+        """
+
+        import os
+        import re
+        import numpy as np
+        import pandas as pd
+        import matplotlib.pyplot as plt
+
+        if not os.path.isfile(health_csv_path):
+            print(
+                f"[WARN] No health CSV found yet: {health_csv_path}"
+            )
+            return None
+
+        df = pd.read_csv(health_csv_path)
+
+        if df.empty:
+            print(
+                f"[WARN] Health CSV is empty: {health_csv_path}"
+            )
+            return None
+
+        def get_call_idx(tag):
+            match = re.search(
+                r"call_(\d+)",
+                str(tag)
+            )
+
+            if match:
+                return int(match.group(1))
+
+            return np.nan
+
+        df["call_idx"] = df["tag"].apply(get_call_idx)
+
+        df = df.dropna(
+            subset=["call_idx", "addr", "health"]
+        ).copy()
+
+        df["call_idx"] = df["call_idx"].astype(int)
+
+        health_map = df.pivot_table(
+            index="addr",
+            columns="call_idx",
+            values="health",
+            aggfunc="mean"
+        )
+
+        health_map = health_map.sort_index()
+
+        fig, ax = plt.subplots(
+            figsize=(10, 12)
+        )
+
+        im = ax.imshow(
+            health_map.values,
+            aspect="auto",
+            vmin=0,
+            vmax=100
+        )
+
+        cbar = fig.colorbar(
+            im,
+            ax=ax
+        )
+
+        cbar.set_label(
+            "Health (%)"
+        )
+
+        ax.set_xlabel(
+            "Optimizer call number"
+        )
+
+        ax.set_ylabel(
+            "Bulb address"
+        )
+
+        ax.set_title(
+            "Active 20 V / 3 A Bulb Health Over Time"
+        )
+
+        x_labels = list(
+            health_map.columns
+        )
+
+        y_labels = list(
+            health_map.index
+        )
+
+        x_step = max(
+            1,
+            len(x_labels) // 10
+        )
+
+        y_step = max(
+            1,
+            len(y_labels) // 20
+        )
+
+        ax.set_xticks(
+            np.arange(len(x_labels))[::x_step]
+        )
+
+        ax.set_xticklabels(
+            x_labels[::x_step],
+            rotation=45,
+            ha="right"
+        )
+
+        ax.set_yticks(
+            np.arange(len(y_labels))[::y_step]
+        )
+
+        ax.set_yticklabels(
+            y_labels[::y_step]
+        )
+
+        fig.tight_layout()
+
+        if save_path is not None:
+            fig.savefig(
+                save_path,
+                dpi=300,
+                bbox_inches="tight"
+            )
+
+            print(
+                f"[Health plot] Saved: {save_path}"
+            )
+
+        if show:
+            plt.show()
+        else:
+            plt.close(fig)
+
+        return health_map
+
+    def Start_Array_Health_Monitor(
+        self,
+        save_path,
+        tag="",
+        interval=1.0,
+        ideal_W=40.0,
+        low_W=30.0,
+        high_W=50.0
+    ):
+        """
+        Start background health monitoring.
+
+        Intended use:
+            start right before VNA measurement
+            stop right after VNA measurement
+
+        Returns:
+            stop_event, thread
+        """
+
+        import threading
+        import time
+
+        stop_event = threading.Event()
+
+        def monitor_loop():
+            sample_idx = 0
+
+            while not stop_event.is_set():
+                sample_tag = f"{tag}_sample{sample_idx}"
+
+                try:
+                    self.Check_Array_Health(
+                        save_path=save_path,
+                        tag=sample_tag,
+                        ideal_W=ideal_W,
+                        low_W=low_W,
+                        high_W=high_W
+                    )
+
+                except Exception as exc:
+                    print(
+                        f"[WARN] Health monitor failed "
+                        f"on {sample_tag}: {exc}"
+                    )
+
+                sample_idx += 1
+                stop_event.wait(interval)
+
+        thread = threading.Thread(
+            target=monitor_loop,
+            daemon=True
+        )
+
+        thread.start()
+
+        return stop_event, thread
     
     def Run_Bulb_VI(self, addr, V, I, t = 0, verbose = True):
         """
@@ -1466,17 +2072,116 @@ class PMMInSitu:
     #                 value = 1, functioncode = 6)
     #     return
 
-    def Activate_Bulb(self, addr):
-        """
-        Activate bulb
-        """
-        if addr == 'all':
-            return self.parallel_bulb_op("Activate_Bulb", tries=3, delay=0.6)
-        else:
-            self.bulbs[addr]['Inst'].write_register(registeraddress = 0x1006,
-                                                    value = 1, functioncode = 6)
-        return
+    # def Activate_Bulb(self, addr):
+    #     """
+    #     Activate bulb
+    #     """
+    #     if addr == 'all':
+    #         return self.parallel_bulb_op("Activate_Bulb", tries=3, delay=0.6)
+    #     else:
+    #         self.bulbs[addr]['Inst'].write_register(registeraddress = 0x1006,
+    #                                                 value = 1, functioncode = 6)
+    #     return
 
+    def Activate_Bulb(self, addr):
+            """
+            Activate bulb.
+
+            For addr == 'all':
+                1. Try the normal fast broadcast/parallel activation.
+                2. Verify every supply reports ON.
+                3. Retry missed supplies individually.
+                4. Raise an error if any still fail.
+            """
+            import time
+
+            if addr == 'all':
+
+                # First try the original fast behavior.
+                self.parallel_bulb_op(
+                    "Activate_Bulb",
+                    tries=3,
+                    delay=0.6
+                )
+
+                time.sleep(0.2)
+
+                # Check which supplies actually turned ON.
+                off_addrs = []
+
+                for port, addr_list in self.config["serial_ports"].items():
+                    for bulb_addr in addr_list:
+                        try:
+                            on = self.bulbs[bulb_addr]['Inst'].read_register(
+                                0x1004
+                            )
+
+                            if on != 1:
+                                off_addrs.append(bulb_addr)
+
+                        except Exception:
+                            off_addrs.append(bulb_addr)
+
+                # If all supplies turned ON, we're done.
+                if not off_addrs:
+                    return
+
+                print(
+                    "[WARN] These supplies missed Activate_Bulb('all'):",
+                    off_addrs
+                )
+
+                print(
+                    "[WARN] Retrying missed supplies individually..."
+                )
+
+                # Retry only the missed supplies individually.
+                still_off = []
+
+                for bulb_addr in off_addrs:
+
+                    success = False
+
+                    for attempt in range(3):
+                        try:
+                            self.bulbs[bulb_addr]['Inst'].write_register(
+                                registeraddress=0x1006,
+                                value=1,
+                                functioncode=6
+                            )
+
+                            time.sleep(0.05)
+
+                            on = self.bulbs[bulb_addr]['Inst'].read_register(
+                                0x1004
+                            )
+
+                            if on == 1:
+                                success = True
+                                break
+
+                        except Exception:
+                            time.sleep(0.2)
+
+                    if not success:
+                        still_off.append(bulb_addr)
+
+                if still_off:
+                    raise RuntimeError(
+                        "These supplies did not turn ON after "
+                        f"Activate_Bulb('all') retries: {still_off}"
+                    )
+
+                return
+
+            else:
+                self.bulbs[addr]['Inst'].write_register(
+                    registeraddress=0x1006,
+                    value=1,
+                    functioncode=6
+                )
+
+            return
 
 
     # def Deactivate_Bulb(self,addr):
@@ -1864,6 +2569,81 @@ class PMMInSitu:
         time.sleep(1)
         self.Set_Bulb_VI('all', activate-4, 10, verbose=False)
 
+        # Verify every supply actually turned ON. Sometimes the broadcast Activate_Bulb('all') 
+        # command can be missed by individual supplies even when voltage/current setpoints update.
+        off_addrs = []
+
+        for port, address_list in self.config["serial_ports"].items():
+            for addr in address_list:
+                try:
+                    on = self.bulbs[addr]["Inst"].read_register(0x1004)
+
+                    if on != 1:
+                        off_addrs.append(addr)
+
+                except Exception as exc:
+                    off_addrs.append(addr)
+
+                    if v:
+                        print(
+                            f"Could not read ON/OFF status for bulb {addr}: {exc}"
+                        )
+
+        if off_addrs:
+            print(
+                "[WARN] Some supplies were OFF after Activate_Bulb('all'):",
+                off_addrs
+            )
+
+            print(
+                "[WARN] Trying to activate those supplies individually..."
+            )
+
+            max_individual_attempts = 3
+            still_off = []
+
+            for addr in off_addrs:
+
+                turned_on = False
+
+                for attempt in range(max_individual_attempts):
+                    try:
+                        print(
+                            f"[WARN] Attempt {attempt + 1}/"
+                            f"{max_individual_attempts} to activate bulb {addr}"
+                        )
+
+                        self.Activate_Bulb(addr)
+                        time.sleep(0.5)
+
+                        on = self.bulbs[addr]["Inst"].read_register(0x1004)
+
+                        # Bit-check is safer in case the status register has extra bits.
+                        if on & 0x0001:
+                            turned_on = True
+                            break
+
+                    except Exception as exc:
+                        print(
+                            f"[WARN] Failed individual Activate_Bulb({addr}) "
+                            f"on attempt {attempt + 1}: {exc}"
+                        )
+                        time.sleep(0.5)
+
+                if not turned_on:
+                    still_off.append(addr)
+
+            if still_off:
+                self.Deactivate_Bulb("all")
+                time.sleep(1)
+                self.Deactivate_Bulb("all")
+
+                raise RuntimeError(
+                    "These supplies stayed OFF even after "
+                    f"{max_individual_attempts} individual activation attempts: "
+                    f"{still_off}"
+                )
+
         port_to_addrs = self.config["serial_ports"]
         
         def process_port_for_set_vi(address_list, bulb_settings):
@@ -1981,7 +2761,12 @@ class PMMInSitu:
         max_attempts = 6
         for attempt in range(max_attempts):
             try:
-                instr = RsInstrument(self.VNA)
+                instr = RsInstrument(
+                    self.VNA,
+                    True,
+                    False,
+                    "SelectVisa='rs'"
+                )
 
                 instr.write_str('TRIGger1:SEQuence:SOURce IMM')
                 time.sleep(7)
@@ -2027,7 +2812,12 @@ class PMMInSitu:
 
         for attempt in range(max_attempts):
             try:
-                instr = RsInstrument(self.VNA)
+                instr = RsInstrument(
+                    self.VNA,
+                    True,
+                    False,
+                    "SelectVisa='rs'"
+                )
 
                 instr.write_str('TRIGger1:SEQuence:SOURce IMM')
                 time.sleep(7)
@@ -2316,7 +3106,15 @@ class PMMInSitu:
         target_ports=None,
         wrong_port_weights=None,
         plot_ports=None,
-        random_state=None
+        random_state=None,
+        health_log_path=None,
+        active_health_every=20,
+        active_health_V=20.0,
+        active_health_I=3.0,
+        active_health_warmup=5.0,
+        active_health_cooldown=3.0,
+        active_health_log_path=None,
+        health_monitor_interval=1.0,
     ):
         """
         Bayesian six-port demultiplexer optimization.
@@ -2369,6 +3167,38 @@ class PMMInSitu:
             )
         )
 
+        # if health_log_path is None:
+        #     health_log_path = os.path.join(
+        #         progress_dir,
+        #         (
+        #             f"health_Demult_{f1:.1f}_{f2:.1f}GHz_"
+        #             f"fpm_{fpm:.1f}GHz{ID}.csv"
+        #         )
+        #     )
+
+        if (
+            active_health_log_path is None
+            and active_health_every is not None
+            and active_health_every > 0
+        ):
+            active_health_log_path = os.path.join(
+                progress_dir,
+                (
+                    f"active_health_Demult_{f1:.1f}_{f2:.1f}GHz_"
+                    f"fpm_{fpm:.1f}GHz{ID}.csv"
+                )
+            )
+
+        active_health_plot_path = None
+
+        if active_health_log_path is not None:
+            active_health_plot_path = active_health_log_path.replace(
+                ".csv",
+                ".pdf"
+            )
+
+
+        
         x0_initial = None
         y0_initial = None
 
@@ -2530,7 +3360,9 @@ class PMMInSitu:
                 w_trans=w_trans,
                 w_iso=w_iso,
                 target_ports=target_ports,
-                wrong_port_weights=wrong_port_weights
+                wrong_port_weights=wrong_port_weights,
+                health_log_path=health_log_path,
+                health_monitor_interval=health_monitor_interval
             )
 
             np.savetxt(
@@ -2567,7 +3399,9 @@ class PMMInSitu:
                 w_trans=w_trans,
                 w_iso=w_iso,
                 target_ports=target_ports,
-                wrong_port_weights=wrong_port_weights
+                wrong_port_weights=wrong_port_weights,
+                health_log_path=health_log_path,
+                health_monitor_interval=health_monitor_interval
             )
 
             # gp_minimize minimizes.
@@ -2586,7 +3420,15 @@ class PMMInSitu:
                 fwin,
                 progress_dir,
                 show_each_call=show_each_call,
-                plot_ports=plot_ports
+                plot_ports=plot_ports,
+
+                active_health_every=active_health_every,
+                active_health_log_path=active_health_log_path,
+                active_health_plot_path=active_health_plot_path,
+                active_health_V=active_health_V,
+                active_health_I=active_health_I,
+                active_health_warmup=active_health_warmup,
+                active_health_cooldown=active_health_cooldown
             )
         )
 
@@ -2718,7 +3560,9 @@ class PMMInSitu:
         w_trans=0.25,
         w_iso=1.0,
         target_ports=None,
-        wrong_port_weights=None
+        wrong_port_weights=None,
+        health_log_path=None,
+        health_monitor_interval=1.0
     ):
             """
             Apply one rho candidate, measure all five output ports,
@@ -2747,15 +3591,45 @@ class PMMInSitu:
 
                 time.sleep(1)
 
-                # Measure all five output ports.
-                (
-                    freq,
-                    S21,
-                    S31,
-                    S41,
-                    S51,
-                    S61
-                ) = self.Get_S21_S31_S41_S51_S61()
+                health_stop = None
+                health_thread = None
+
+                if health_log_path is not None:
+                    if not hasattr(self, "_health_eval_counter"):
+                        self._health_eval_counter = 0
+
+                    self._health_eval_counter += 1
+
+                    health_tag = (
+                        f"demult_eval_{self._health_eval_counter}"
+                    )
+
+                    health_stop, health_thread = self.Start_Array_Health_Monitor(
+                        save_path=health_log_path,
+                        tag=health_tag,
+                        interval=health_monitor_interval,
+                        ideal_W=40.0,
+                        low_W=30.0,
+                        high_W=50.0
+                    )
+
+                try:
+                    # Measure all five output ports.
+                    (
+                        freq,
+                        S21,
+                        S31,
+                        S41,
+                        S51,
+                        S61
+                    ) = self.Get_S21_S31_S41_S51_S61()
+
+                finally:
+                    if health_stop is not None:
+                        health_stop.set()
+
+                    if health_thread is not None:
+                        health_thread.join(timeout=30)
 
             finally:
                 # Always turn the array off, even if the VNA read fails.
